@@ -6,11 +6,10 @@ import time
 import hmac
 import hashlib
 import secrets
-from datetime import datetime, timedelta
 
 import streamlit as st
-import extra_streamlit_components as stx
 from groq import Groq
+from streamlit_cookies_manager import EncryptedCookieManager
 
 # ==================================================
 # CONFIGURAÇÃO
@@ -23,21 +22,42 @@ st.set_page_config(
 
 PASTA_DADOS = "dados_usuarios"
 COOKIE_NOME = "gepetto_auth"
-DURACAO_COOKIE = 30 * 24 * 60 * 60  # 30 dias
+DURACAO_COOKIE = 30 * 24 * 60 * 60
 
 os.makedirs(PASTA_DADOS, exist_ok=True)
 
 # ==================================================
-# COOKIE
+# COOKIES CRIPTOGRAFADOS
 # ==================================================
-cookie_manager = stx.CookieManager(
-    key="gepetto_cookie_manager"
-)
+try:
+    senha_cookies = str(st.secrets["COOKIES_PASSWORD"])
+
+    if len(senha_cookies) < 32:
+        st.error(
+            "COOKIES_PASSWORD precisa ter pelo menos "
+            "32 caracteres. Configure em Settings > Secrets."
+        )
+        st.stop()
+
+    cookies = EncryptedCookieManager(
+        prefix="gepetto-ai/",
+        password=senha_cookies
+    )
+
+except Exception:
+    st.error(
+        "Configure COOKIES_PASSWORD em "
+        "Streamlit Cloud > Settings > Secrets."
+    )
+    st.stop()
+
+# Aguarda o navegador disponibilizar os cookies.
+if not cookies.ready():
+    st.info("Carregando sua sessão...")
+    st.stop()
 
 # ==================================================
 # GROQ
-# Configure GROQ_API_KEY em Settings > Secrets.
-# Nunca publique sua chave no GitHub.
 # ==================================================
 @st.cache_resource
 def get_groq_client(api_key):
@@ -57,7 +77,7 @@ def obter_cliente():
 client = obter_cliente()
 
 # ==================================================
-# INSTRUÇÕES DO GEPETTO
+# PERSONALIDADE DO GEPETTO
 # ==================================================
 INSTRUCOES_SISTEMA = {
     "role": "system",
@@ -71,7 +91,7 @@ INSTRUCOES_SISTEMA = {
 
 
 # ==================================================
-# ARQUIVOS E SENHAS
+# USUÁRIOS E ARQUIVOS
 # ==================================================
 def obter_nome_arquivo(apelido):
     nome_limpo = re.sub(
@@ -91,12 +111,14 @@ def obter_nome_arquivo(apelido):
 
 def gerar_hash_senha(senha):
     salt = os.urandom(16)
+
     derivacao = hashlib.pbkdf2_hmac(
         "sha256",
         senha.encode("utf-8"),
         salt,
         200000
     )
+
     return salt.hex() + ":" + derivacao.hex()
 
 
@@ -143,7 +165,6 @@ def salvar_dados_usuario(
     historico,
     token_hash=None
 ):
-    # Preserva o token existente quando o histórico é salvo.
     dados_antigos = carregar_dados_usuario(arquivo) or {}
 
     if token_hash is None:
@@ -158,7 +179,12 @@ def salvar_dados_usuario(
     temporario = arquivo + ".tmp"
 
     with open(temporario, "w", encoding="utf-8") as f:
-        json.dump(dados, f, ensure_ascii=False, indent=4)
+        json.dump(
+            dados,
+            f,
+            ensure_ascii=False,
+            indent=4
+        )
 
     os.replace(temporario, arquivo)
 
@@ -168,88 +194,104 @@ def criar_historico():
 
 
 # ==================================================
-# RECUPERAR LOGIN PELO COOKIE
+# SESSÃO E AUTENTICAÇÃO
 # ==================================================
-def localizar_usuario_por_token(token):
-    if not isinstance(token, str) or len(token) < 32:
-        return None
-
-    token_procurado = hash_token(token)
-
-    try:
-        arquivos = os.listdir(PASTA_DADOS)
-    except OSError:
-        return None
-
-    for nome in arquivos:
-        if not nome.startswith("historico_") or not nome.endswith(".json"):
-            continue
-
-        arquivo = os.path.join(PASTA_DADOS, nome)
-        dados = carregar_dados_usuario(arquivo)
-
-        if not dados:
-            continue
-
-        token_salvo = dados.get("token_hash", "")
-
-        if token_salvo and hmac.compare_digest(
-            str(token_salvo),
-            token_procurado
-        ):
-            apelido = nome[len("historico_"):-len(".json")]
-
-            return {
-                "arquivo": arquivo,
-                "apelido": apelido,
-                "dados": dados
-            }
-
-    return None
-
-
-def restaurar_login():
-    try:
-        cookies = cookie_manager.get_all(key="gepetto_get_cookies")
-        token = cookies.get(COOKIE_NOME) if cookies else None
-
-        if not token:
-            return
-
-        usuario = localizar_usuario_por_token(token)
-
-        if usuario:
-            historico = usuario["dados"].get(
-                "historico",
-                criar_historico()
-            )
-
-            if not historico:
-                historico = criar_historico()
-
-            st.session_state.autenticado = True
-            st.session_state.historico = historico
-            st.session_state.nome_arquivo = usuario["arquivo"]
-            st.session_state.apelido = usuario["apelido"]
-
-    except Exception:
-        # Se o cookie ainda não estiver disponível,
-        # o usuário pode entrar normalmente com a senha.
-        pass
-
-
-# ==================================================
-# ESTADO DA SESSÃO
-# ==================================================
-if "autenticado" not in st.session_state:
+def limpar_sessao():
     st.session_state.autenticado = False
     st.session_state.historico = []
     st.session_state.nome_arquivo = ""
     st.session_state.apelido = ""
     st.session_state.confirmar_exclusao = False
-    st.session_state.login_verificado = False
 
-# Tenta restaurar a sessão após uma atualização.
+
+def autenticar_usuario(arquivo, apelido, dados):
+    historico = dados.get("historico", criar_historico())
+
+    if not historico:
+        historico = criar_historico()
+
+    st.session_state.autenticado = True
+    st.session_state.historico = historico
+    st.session_state.nome_arquivo = arquivo
+    st.session_state.apelido = apelido
+
+
+def criar_cookie_login(arquivo, apelido, dados):
+    # Token imprevisível. O arquivo guarda somente seu hash.
+    token = secrets.token_urlsafe(32)
+
+    senha_salva = dados.get("senha", "")
+    historico = dados.get("historico", criar_historico())
+
+    salvar_dados_usuario(
+        arquivo,
+        senha_salva,
+        historico,
+        token_hash=hash_token(token)
+    )
+
+    cookies[COOKIE_NOME] = token
+    cookies.save()
+
+    autenticar_usuario(arquivo, apelido, dados)
+
+
+def restaurar_login():
+    try:
+        token = cookies.get(COOKIE_NOME)
+
+        if not token or not isinstance(token, str):
+            return False
+
+        token_procurado = hash_token(token)
+
+        for nome in os.listdir(PASTA_DADOS):
+            if (
+                not nome.startswith("historico_")
+                or not nome.endswith(".json")
+            ):
+                continue
+
+            arquivo = os.path.join(PASTA_DADOS, nome)
+            dados = carregar_dados_usuario(arquivo)
+
+            if not dados:
+                continue
+
+            token_salvo = dados.get("token_hash", "")
+
+            if (
+                token_salvo
+                and hmac.compare_digest(
+                    str(token_salvo),
+                    token_procurado
+                )
+            ):
+                apelido = nome[
+                    len("historico_"):-len(".json")
+                ]
+
+                autenticar_usuario(
+                    arquivo,
+                    apelido,
+                    dados
+                )
+
+                return True
+
+    except Exception:
+        return False
+
+    return False
+
+
+# ==================================================
+# INICIALIZAÇÃO
+# ==================================================
+if "autenticado" not in st.session_state:
+    limpar_sessao()
+
+# Só tenta restaurar se esta sessão ainda não entrou.
 if not st.session_state.autenticado:
     restaurar_login()
 
@@ -300,48 +342,23 @@ if not st.session_state.autenticado:
                     ):
                         senha_salva = dados["senha"]
 
-                        # Atualiza contas antigas para hash.
+                        # Converte senhas antigas em texto puro.
                         if ":" not in senha_salva:
-                            senha_salva = gerar_hash_senha(senha_input)
+                            senha_salva = gerar_hash_senha(
+                                senha_input
+                            )
 
-                        # Cria um token novo para este login.
-                        token = secrets.token_urlsafe(32)
-                        token_hash_salvo = hash_token(token)
+                        dados["senha"] = senha_salva
 
-                        historico = dados.get(
-                            "historico",
-                            criar_historico()
-                        )
-
-                        if not historico:
-                            historico = criar_historico()
-
-                        salvar_dados_usuario(
+                        # Cria uma sessão persistente no navegador.
+                        criar_cookie_login(
                             arquivo,
-                            senha_salva,
-                            historico,
-                            token_hash=token_hash_salvo
+                            apelido_input,
+                            dados
                         )
 
-                        # Cookie válido por 30 dias.
-                        cookie_manager.set(
-                            COOKIE_NOME,
-                            token,
-                            key="gepetto_auth_set",
-                            max_age=DURACAO_COOKIE,
-                            path="/",
-                            secure=True,
-                            same_site="lax"
-                        )
-
-                        st.session_state.historico = historico
-                        st.session_state.nome_arquivo = arquivo
-                        st.session_state.apelido = apelido_input
-                        st.session_state.autenticado = True
-                        st.session_state.login_verificado = True
-
-                        st.success("Login realizado com sucesso!")
-                        time.sleep(0.3)
+                        st.success("Login realizado!")
+                        time.sleep(0.5)
                         st.rerun()
 
                     else:
@@ -393,33 +410,28 @@ if not st.session_state.autenticado:
                     else:
                         historico = criar_historico()
                         senha_hash = gerar_hash_senha(senha_input)
-                        token = secrets.token_urlsafe(32)
+
+                        dados = {
+                            "senha": senha_hash,
+                            "historico": historico,
+                            "token_hash": ""
+                        }
 
                         salvar_dados_usuario(
                             arquivo,
                             senha_hash,
                             historico,
-                            token_hash=hash_token(token)
+                            token_hash=""
                         )
 
-                        cookie_manager.set(
-                            COOKIE_NOME,
-                            token,
-                            key="gepetto_auth_set",
-                            max_age=DURACAO_COOKIE,
-                            path="/",
-                            secure=True,
-                            same_site="lax"
+                        criar_cookie_login(
+                            arquivo,
+                            apelido_input,
+                            dados
                         )
-
-                        st.session_state.historico = historico
-                        st.session_state.nome_arquivo = arquivo
-                        st.session_state.apelido = apelido_input
-                        st.session_state.autenticado = True
-                        st.session_state.login_verificado = True
 
                         st.success("Conta criada com sucesso!")
-                        time.sleep(0.3)
+                        time.sleep(0.5)
                         st.rerun()
 
                 except Exception as erro:
@@ -437,10 +449,10 @@ else:
         st.write(f"Usuário: **{st.session_state.apelido}**")
 
         if st.button("Sair da Conta", use_container_width=True):
-            # Invalida o token no arquivo do usuário.
             arquivo = st.session_state.nome_arquivo
             dados = carregar_dados_usuario(arquivo)
 
+            # Invalida o token no servidor.
             if dados:
                 salvar_dados_usuario(
                     arquivo,
@@ -449,20 +461,15 @@ else:
                     token_hash=""
                 )
 
+            # Remove o cookie persistente.
             try:
-                cookie_manager.delete(
-                    COOKIE_NOME,
-                    key="gepetto_auth_delete"
-                )
+                if COOKIE_NOME in cookies:
+                    del cookies[COOKIE_NOME]
+                cookies.save()
             except Exception:
                 pass
 
-            st.session_state.autenticado = False
-            st.session_state.historico = []
-            st.session_state.nome_arquivo = ""
-            st.session_state.apelido = ""
-            st.session_state.confirmar_exclusao = False
-            st.session_state.login_verificado = True
+            limpar_sessao()
             st.rerun()
 
         st.write("---")
@@ -485,26 +492,20 @@ else:
                     os.remove(arquivo)
 
                 try:
-                    cookie_manager.delete(
-                        COOKIE_NOME,
-                        key="gepetto_auth_delete"
-                    )
+                    if COOKIE_NOME in cookies:
+                        del cookies[COOKIE_NOME]
+                    cookies.save()
                 except Exception:
                     pass
 
-                st.session_state.autenticado = False
-                st.session_state.historico = []
-                st.session_state.nome_arquivo = ""
-                st.session_state.apelido = ""
-                st.session_state.confirmar_exclusao = False
-                st.session_state.login_verificado = True
+                limpar_sessao()
                 st.rerun()
 
             if st.button("Cancelar"):
                 st.session_state.confirmar_exclusao = False
                 st.rerun()
 
-    # Mostra as mensagens anteriores.
+    # Exibe o histórico.
     for mensagem in st.session_state.historico:
         if mensagem["role"] == "user":
             with st.chat_message("user"):
@@ -556,23 +557,13 @@ else:
 
                 dados_atuais = carregar_dados_usuario(
                     st.session_state.nome_arquivo
-                )
-
-                senha_atual = (
-                    dados_atuais.get("senha", "")
-                    if dados_atuais else ""
-                )
-
-                token_hash_atual = (
-                    dados_atuais.get("token_hash", "")
-                    if dados_atuais else ""
-                )
+                ) or {}
 
                 salvar_dados_usuario(
                     st.session_state.nome_arquivo,
-                    senha_atual,
+                    dados_atuais.get("senha", ""),
                     st.session_state.historico,
-                    token_hash=token_hash_atual
+                    token_hash=dados_atuais.get("token_hash", "")
                 )
 
             except Exception as erro:
