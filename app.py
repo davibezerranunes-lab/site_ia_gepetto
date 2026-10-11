@@ -1,15 +1,11 @@
-
 import os
 import re
-import time
 import json
+import time
+import hashlib
+import hmac
 import streamlit as st
 from groq import Groq
-
-# ==================================================
-# COLOQUE SUA API KEY DA GROQ AQUI
-# ==================================================
-GROQ_API_KEY = "SUA_CHAVE_AQUI"
 
 # ==================================================
 # CONFIGURAÇÃO DO SITE
@@ -21,27 +17,37 @@ st.set_page_config(
 )
 
 # ==================================================
-# CLIENTE GROQ
+# API DA GROQ
+# Configure GROQ_API_KEY em Settings > Secrets
+# do Streamlit Cloud. Não coloque a chave no GitHub.
 # ==================================================
 @st.cache_resource
-def get_groq_client():
-    if (
-        not GROQ_API_KEY
-        or GROQ_API_KEY == "COLE_SUA_API_KEY_AQUI"
-    ):
+def get_groq_client(api_key):
+    return Groq(api_key=api_key)
+
+
+def obter_cliente():
+    try:
+        chave = st.secrets["GROQ_API_KEY"]
+        if not chave or not str(chave).strip():
+            return None
+        return get_groq_client(str(chave).strip())
+    except Exception:
         return None
 
-    return Groq(api_key=GROQ_API_KEY)
 
-
-try:
-    client = get_groq_client()
-except Exception:
-    client = None
-
+client = obter_cliente()
 
 # ==================================================
-# CONFIGURAÇÕES DO GEPETTO
+# ARMAZENAMENTO LOCAL
+# ATENÇÃO: arquivos locais no Streamlit Cloud não
+# garantem persistência permanente entre reinícios.
+# ==================================================
+PASTA_DADOS = "dados_usuarios"
+os.makedirs(PASTA_DADOS, exist_ok=True)
+
+# ==================================================
+# INSTRUÇÕES DO GEPETTO
 # ==================================================
 INSTRUCOES_SISTEMA = {
     "role": "system",
@@ -50,17 +56,12 @@ INSTRUCOES_SISTEMA = {
         "acolhedora e ajudadora de pessoas. "
         "Responda sempre em português do Brasil. "
         "Seja amigável, prestativo e forneça informações "
-        "precisas. Quando for falar coisas que vão levar "
-        "muitas linhas, RESUMA."
+        "precisas. Quando a resposta for longa, RESUMA."
     )
 }
 
-PASTA_DADOS = "dados_usuarios"
-os.makedirs(PASTA_DADOS, exist_ok=True)
-
-
 # ==================================================
-# FUNÇÕES DE USUÁRIO E HISTÓRICO
+# FUNÇÕES DE USUÁRIO
 # ==================================================
 def obter_nome_arquivo(apelido):
     nome_limpo = re.sub(
@@ -78,6 +79,40 @@ def obter_nome_arquivo(apelido):
     )
 
 
+def gerar_hash_senha(senha):
+    salt = os.urandom(16)
+    derivacao = hashlib.pbkdf2_hmac(
+        "sha256",
+        senha.encode("utf-8"),
+        salt,
+        200000
+    )
+    return salt.hex() + ":" + derivacao.hex()
+
+
+def verificar_senha(senha, senha_salva):
+    # Compatibilidade com contas antigas que guardavam
+    # a senha em texto puro.
+    if ":" not in senha_salva:
+        return hmac.compare_digest(senha, senha_salva)
+
+    try:
+        salt_hex, hash_salvo = senha_salva.split(":", 1)
+        salt = bytes.fromhex(salt_hex)
+
+        derivacao = hashlib.pbkdf2_hmac(
+            "sha256",
+            senha.encode("utf-8"),
+            salt,
+            200000
+        ).hex()
+
+        return hmac.compare_digest(derivacao, hash_salvo)
+
+    except (ValueError, TypeError):
+        return False
+
+
 def carregar_dados_usuario(nome_arquivo):
     if not os.path.exists(nome_arquivo):
         return None
@@ -89,9 +124,9 @@ def carregar_dados_usuario(nome_arquivo):
         return None
 
 
-def salvar_dados_usuario(nome_arquivo, senha, historico):
+def salvar_dados_usuario(nome_arquivo, senha_salva, historico):
     dados = {
-        "senha": senha,
+        "senha": senha_salva,
         "historico": historico
     }
 
@@ -120,17 +155,16 @@ if "autenticado" not in st.session_state:
     st.session_state.historico = []
     st.session_state.nome_arquivo = ""
     st.session_state.apelido = ""
-
+    st.session_state.confirmar_exclusao = False
 
 # ==================================================
-# TÍTULO
+# CABEÇALHO
 # ==================================================
 st.title("🤖 GEPETTO - Assistente Virtual")
 st.write("---")
 
-
 # ==================================================
-# TELA DE LOGIN E CADASTRO
+# LOGIN E CADASTRO
 # ==================================================
 if not st.session_state.autenticado:
 
@@ -139,13 +173,9 @@ if not st.session_state.autenticado:
         ("Selecione uma opção", "Sim", "Não")
     )
 
-    # ---------------- LOGIN ----------------
     if conhece == "Sim":
 
-        apelido_input = st.text_input(
-            "Digite seu apelido:"
-        ).strip()
-
+        apelido_input = st.text_input("Digite seu apelido:").strip()
         senha_input = st.text_input(
             "Digite sua senha:",
             type="password"
@@ -163,45 +193,54 @@ if not st.session_state.autenticado:
 
                     if dados is None:
                         st.error(
-                            "Conta não encontrada. "
-                            "Confira o apelido ou crie uma conta."
+                            "Conta não encontrada. Confira o apelido "
+                            "ou selecione Não para criar uma conta."
                         )
 
-                    elif dados.get("senha") != senha_input:
-                        st.error("Senha incorreta!")
+                    elif verificar_senha(
+                        senha_input,
+                        str(dados.get("senha", ""))
+                    ):
+                        # Atualiza contas antigas para senha com hash.
+                        senha_salva = dados.get("senha", "")
+                        if ":" not in senha_salva:
+                            dados["senha"] = gerar_hash_senha(senha_input)
+                            salvar_dados_usuario(
+                                arquivo,
+                                dados["senha"],
+                                dados.get("historico", criar_historico())
+                            )
 
-                    else:
-                        st.session_state.historico = dados.get(
+                        historico = dados.get(
                             "historico",
                             criar_historico()
                         )
 
-                        if not st.session_state.historico:
-                            st.session_state.historico = criar_historico()
+                        if not historico:
+                            historico = criar_historico()
 
+                        st.session_state.historico = historico
                         st.session_state.nome_arquivo = arquivo
                         st.session_state.apelido = apelido_input
                         st.session_state.autenticado = True
 
                         st.success("Login realizado com sucesso!")
-                        time.sleep(0.5)
+                        time.sleep(0.3)
                         st.rerun()
+
+                    else:
+                        st.error("Senha incorreta!")
 
                 except Exception as erro:
                     st.error(f"Erro ao entrar: {erro}")
 
-    # ---------------- CADASTRO ----------------
     elif conhece == "Não":
 
-        apelido_input = st.text_input(
-            "Escolha um apelido:"
-        ).strip()
-
+        apelido_input = st.text_input("Escolha um apelido:").strip()
         senha_input = st.text_input(
             "Crie uma senha de acesso:",
             type="password"
         )
-
         confirmar_senha = st.text_input(
             "Confirme sua senha:",
             type="password"
@@ -233,10 +272,11 @@ if not st.session_state.autenticado:
 
                     else:
                         historico = criar_historico()
+                        senha_hash = gerar_hash_senha(senha_input)
 
                         salvar_dados_usuario(
                             arquivo,
-                            senha_input,
+                            senha_hash,
                             historico
                         )
 
@@ -246,15 +286,14 @@ if not st.session_state.autenticado:
                         st.session_state.autenticado = True
 
                         st.success("Conta criada com sucesso!")
-                        time.sleep(0.5)
+                        time.sleep(0.3)
                         st.rerun()
 
                 except Exception as erro:
                     st.error(f"Erro ao criar conta: {erro}")
 
-
 # ==================================================
-# TELA DO CHAT
+# CHAT
 # ==================================================
 else:
 
@@ -262,35 +301,31 @@ else:
         f"Conversando com {st.session_state.apelido}"
     )
 
-    # ---------------- BARRA LATERAL ----------------
     with st.sidebar:
 
-        st.write(
-            f"Usuário: **{st.session_state.apelido}**"
-        )
+        st.write(f"Usuário: **{st.session_state.apelido}**")
 
         if st.button("Sair da Conta", use_container_width=True):
             st.session_state.autenticado = False
             st.session_state.historico = []
             st.session_state.nome_arquivo = ""
             st.session_state.apelido = ""
+            st.session_state.confirmar_exclusao = False
             st.rerun()
 
         st.write("---")
 
         if st.button(
-            "🗑️ DELETAR CONTA E HISTÓRICO",
+            "🗑️ Deletar conta e histórico",
             use_container_width=True
         ):
             st.session_state.confirmar_exclusao = True
 
-        if st.session_state.get("confirmar_exclusao", False):
+        if st.session_state.confirmar_exclusao:
 
-            st.warning(
-                "Tem certeza? Essa ação não pode ser desfeita."
-            )
+            st.warning("Tem certeza? Essa ação não pode ser desfeita.")
 
-            if st.button("CONFIRMAR EXCLUSÃO"):
+            if st.button("Confirmar exclusão"):
                 arquivo = st.session_state.nome_arquivo
 
                 if os.path.exists(arquivo):
@@ -303,13 +338,12 @@ else:
                 st.session_state.confirmar_exclusao = False
                 st.rerun()
 
-            if st.button("Cancelar exclusão"):
+            if st.button("Cancelar"):
                 st.session_state.confirmar_exclusao = False
                 st.rerun()
 
-    # ---------------- HISTÓRICO ----------------
+    # Mostra o histórico
     for mensagem in st.session_state.historico:
-
         if mensagem["role"] == "user":
             with st.chat_message("user"):
                 st.write(mensagem["content"])
@@ -318,16 +352,15 @@ else:
             with st.chat_message("assistant", avatar="🤖"):
                 st.write(mensagem["content"])
 
-    # ---------------- ENTRADA DO CHAT ----------------
+    # Entrada de mensagens
     pergunta = st.chat_input("Diga algo para o Gepeto...")
 
     if pergunta:
 
         if client is None:
             st.error(
-                "API Key não configurada. "
-                "Coloque sua chave válida da Groq na variável "
-                "GROQ_API_KEY no começo do código."
+                "API Key não configurada. Acesse o Streamlit Cloud, "
+                "abra Settings > Secrets e configure GROQ_API_KEY."
             )
 
         else:
@@ -351,10 +384,10 @@ else:
                             max_tokens=2048
                         )
 
-                        texto = resposta.choices[0].message.content
-
-                        if not texto:
-                            texto = "Não consegui gerar uma resposta."
+                        texto = (
+                            resposta.choices[0].message.content
+                            or "Não consegui gerar uma resposta."
+                        )
 
                         st.write(texto)
 
@@ -380,8 +413,7 @@ else:
                 )
 
             except Exception as erro:
-
-                # Remove a pergunta que falhou do histórico salvo
+                # Retira a pergunta que falhou da sessão.
                 if (
                     st.session_state.historico
                     and st.session_state.historico[-1]["role"] == "user"
@@ -389,6 +421,4 @@ else:
                 ):
                     st.session_state.historico.pop()
 
-                st.error(
-                    f"Erro ao falar com o Gepetto: {erro}"
-                )
+                st.error(f"Erro ao falar com o Gepetto: {erro}")
