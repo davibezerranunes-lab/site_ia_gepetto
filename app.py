@@ -27,7 +27,7 @@ COOKIE_NOME = "gepetto_usuario"
 COOKIE_TOKEN_NOME = "gepetto_token"
 
 ITERACOES_PBKDF2 = 200_000
-MODELO = "llama-3.3-70b-versatile"
+MODELO = "openai/gpt-oss-20b"
 
 
 # =========================
