@@ -27,7 +27,7 @@ COOKIE_NOME = "gepetto_usuario"
 COOKIE_TOKEN_NOME = "gepetto_token"
 
 ITERACOES_PBKDF2 = 200_000
-MODELO = "llama3-8b-8192"
+MODELO = "llama-3.1-8b-instant"
 
 
 # =========================
