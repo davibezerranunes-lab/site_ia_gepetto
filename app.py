@@ -859,17 +859,41 @@ if dados["chat_atual"]:
                     codigo_fonte_atual = "Código indisponível no momento."
 
                 # TRUQUE: Se digitar 20456742, o Python mostra o código direto na tela
-                if "20456742" in ultima_mensagem_usuario:
-                    area_resposta.markdown("🤖 **Código-fonte solicitado:**")
-                    st.code(codigo_fonte_atual, language="python")
-                    
-                    texto_resposta = "Código-fonte exibido com sucesso."
-                    mensagens.append({
-                        "role": "assistant",
-                        "content": texto_resposta,
-                    })
-                    if not salvar_dados(usuario, dados):
-                        st.error("Não foi possível salvar a resposta no histórico.")
+                
+if ultima_mensagem_usuario.strip() == "20456742":
+    area_resposta.markdown("🤖 **Código-fonte solicitado:**")
+    st.code(codigo_fonte_atual, language="python")
+
+    texto_resposta = "Código-fonte exibido com sucesso."
+    mensagens.append({
+        "role": "assistant",
+        "content": texto_resposta,
+    })
+
+    if not salvar_dados(usuario, dados):
+        st.error("Não foi possível salvar a resposta no histórico.")
+
+elif ultima_mensagem_usuario.strip() == "20456742v2":
+    requirements_txt = (
+        "streamlit\n"
+        "groq\n"
+        "streamlit-cookies-manager"
+    )
+
+    area_resposta.markdown("🤖 **Requirements.txt solicitado:**")
+    st.code(requirements_txt, language="text")
+
+    texto_resposta = "Requirements.txt exibido com sucesso."
+    mensagens.append({
+        "role": "assistant",
+        "content": texto_resposta,
+    })
+
+    if not salvar_dados(usuario, dados):
+        st.error("Não foi possível salvar a resposta no histórico.")
+
+else:
+
 
                 else:
                     # PROMPTS NORMAL E ADMIN (2045)
