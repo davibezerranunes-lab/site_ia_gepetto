@@ -273,7 +273,7 @@ def gerar_titulo(texto):
     return texto
 
 
-def responder_gro q(mensagens):
+def responder_groq(mensagens):
     historico = [
         {
             "role": "system",
