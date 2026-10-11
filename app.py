@@ -1,14 +1,19 @@
 
-import os
 import json
+import hmac
 import hashlib
 import secrets
+import re
 from pathlib import Path
-from datetime import datetime
 
 import streamlit as st
+
+if not hasattr(st, "cache"):
+    st.cache = st.cache_data
+
 from groq import Groq
 from streamlit_cookies_manager import EncryptedCookieManager
+
 
 # =========================
 # CONFIGURAÇÃO
@@ -17,583 +22,641 @@ from streamlit_cookies_manager import EncryptedCookieManager
 st.set_page_config(
     page_title="Gepetto AI",
     page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="centered",
 )
 
 PASTA_DADOS = Path("dados_usuarios")
-ARQUIVO_USUARIOS = PASTA_DADOS / "usuarios.json"
+PASTA_DADOS.mkdir(parents=True, exist_ok=True)
 
-PASTA_DADOS.mkdir(exist_ok=True)
+COOKIE_NOME = "gepetto_usuario"
+ITERACOES_PBKDF2 = 200_000
+MODELO = "openai/gpt-oss-20b"
+
 
 # =========================
-# COOKIES E API
+# COOKIES
 # =========================
 
 try:
-    senha_cookies = st.secrets["COOKIES_PASSWORD"]
-except Exception:
-    senha_cookies = os.environ.get("COOKIES_PASSWORD", "")
+    cookies = EncryptedCookieManager(
+        prefix="gepetto/",
+        password=st.secrets["COOKIES_PASSWORD"],
+    )
 
-if not senha_cookies:
+    if not cookies.ready():
+        st.stop()
+
+except Exception:
     st.error(
-        "Configure COOKIES_PASSWORD nos Secrets do Streamlit "
-        "com uma senha longa e aleatória."
+        "Não foi possível inicializar os cookies. "
+        "Confira COOKIES_PASSWORD nos Secrets."
     )
     st.stop()
 
-cookies = EncryptedCookieManager(
-    prefix="gepetto/",
-    password=senha_cookies
-)
 
-if not cookies.ready():
-    st.stop()
+# =========================
+# GROQ
+# =========================
 
 try:
-    api_key = st.secrets["GROQ_API_KEY"]
+    cliente = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except Exception:
-    api_key = os.environ.get("GROQ_API_KEY", "")
-
-if not api_key:
-    st.error("Configure GROQ_API_KEY nos Secrets do Streamlit.")
+    st.error(
+        "Não foi possível configurar a IA. "
+        "Confira GROQ_API_KEY nos Secrets."
+    )
     st.stop()
 
-cliente = Groq(api_key=api_key)
-MODELO = "openai/gpt-oss-20b"
 
 # =========================
-# ARQUIVOS DE USUÁRIOS
+# ARQUIVOS E USUÁRIOS
 # =========================
 
-def carregar_usuarios():
-    if not ARQUIVO_USUARIOS.exists():
-        return {}
+def caminho_usuario(usuario):
+    identificador = hashlib.sha256(
+        usuario.strip().lower().encode("utf-8")
+    ).hexdigest()
+
+    return PASTA_DADOS / f"{identificador}.json"
+
+
+def carregar_dados(usuario):
+    caminho = caminho_usuario(usuario)
+
+    if not caminho.exists():
+        return None
 
     try:
-        with open(ARQUIVO_USUARIOS, "r", encoding="utf-8") as arquivo:
+        with caminho.open("r", encoding="utf-8") as arquivo:
             dados = json.load(arquivo)
-            return dados if isinstance(dados, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+
+        if not isinstance(dados, dict):
+            return None
+
+        dados["usuario"] = dados.get("usuario") or usuario.strip()
+
+        chats = dados.get("chats")
+        if not isinstance(chats, dict):
+            chats = {}
+
+        chats_validos = {}
+
+        for nome, mensagens in chats.items():
+            if not isinstance(nome, str):
+                continue
+
+            if not isinstance(mensagens, list):
+                mensagens = []
+
+            mensagens_validas = []
+
+            for mensagem in mensagens:
+                if not isinstance(mensagem, dict):
+                    continue
+
+                papel = mensagem.get("role")
+                conteudo = mensagem.get("content")
+
+                if papel not in ("user", "assistant"):
+                    continue
+
+                if not isinstance(conteudo, str):
+                    continue
+
+                mensagens_validas.append({
+                    "role": papel,
+                    "content": conteudo,
+                })
+
+            chats_validos[nome] = mensagens_validas
+
+        if not chats_validos:
+            chats_validos = {"Conversa 1": []}
+
+        dados["chats"] = chats_validos
+
+        chat_atual = dados.get("chat_atual")
+        if (
+            not isinstance(chat_atual, str)
+            or chat_atual not in chats_validos
+        ):
+            chat_atual = next(iter(chats_validos))
+
+        dados["chat_atual"] = chat_atual
+        return dados
+
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
 
 
-def salvar_usuarios(usuarios):
-    arquivo_temporario = ARQUIVO_USUARIOS.with_suffix(".tmp")
+def salvar_dados(usuario, dados):
+    caminho = caminho_usuario(usuario)
+    temporario = caminho.with_suffix(".tmp")
 
-    with open(arquivo_temporario, "w", encoding="utf-8") as arquivo:
-        json.dump(
-            usuarios,
-            arquivo,
-            ensure_ascii=False,
-            indent=2
-        )
+    try:
+        with temporario.open("w", encoding="utf-8") as arquivo:
+            json.dump(
+                dados,
+                arquivo,
+                ensure_ascii=False,
+                indent=2,
+            )
 
-    os.replace(arquivo_temporario, ARQUIVO_USUARIOS)
+        temporario.replace(caminho)
+        return True
+
+    except OSError:
+        try:
+            if temporario.exists():
+                temporario.unlink()
+        except OSError:
+            pass
+
+        return False
 
 
-usuarios = carregar_usuarios()
+# =========================
+# NOME AUTOMÁTICO DO CHAT
+# =========================
+
+def gerar_nome_chat(texto):
+    texto = " ".join(texto.strip().split())
+
+    # Remove pontuação apenas do final da frase.
+    texto = texto.rstrip(" .,!?:;")
+
+    if not texto:
+        return "Nova conversa"
+
+    palavras = texto.split()
+    nome = " ".join(palavras[:6])
+
+    if len(palavras) > 6:
+        nome += "..."
+
+    return nome[:50]
+
+
+def nome_chat_disponivel(chats, nome, chat_original=None):
+    nome_base = nome[:50]
+    nome_final = nome_base
+    contador = 2
+
+    while nome_final in chats and nome_final != chat_original:
+        sufixo = f" ({contador})"
+        nome_final = nome_base[:50 - len(sufixo)] + sufixo
+        contador += 1
+
+    return nome_final
+
 
 # =========================
 # SENHAS
 # =========================
 
-def criar_hash(senha, salt=None):
-    if salt is None:
-        salt = secrets.token_hex(16)
+def gerar_senha(senha):
+    salt = secrets.token_hex(16)
 
-    resultado = hashlib.pbkdf2_hmac(
+    senha_hash = hashlib.pbkdf2_hmac(
         "sha256",
         senha.encode("utf-8"),
         salt.encode("utf-8"),
-        200000
+        ITERACOES_PBKDF2,
     ).hex()
 
-    return salt, resultado
+    return salt, senha_hash
 
 
-def verificar_senha(senha, salt, hash_salvo):
-    _, hash_calculado = criar_hash(senha, salt)
-    return secrets.compare_digest(hash_calculado, hash_salvo)
-
-
-# =========================
-# ESTILO VISUAL
-# =========================
-
-st.markdown("""
-<style>
-    .stApp {
-        background: #0b1020;
-        color: #f1f5f9;
-    }
-
-    [data-testid="stSidebar"] {
-        background: #080d19;
-        border-right: 1px solid #202b42;
-    }
-
-    .gepetto-logo {
-        font-size: 30px;
-        font-weight: 800;
-        color: #7c9cff;
-        letter-spacing: -1px;
-        margin-bottom: 2px;
-    }
-
-    .gepetto-subtitle {
-        color: #8793ad;
-        font-size: 13px;
-        margin-bottom: 24px;
-    }
-
-    .gepetto-card {
-        background: #111a2d;
-        border: 1px solid #263450;
-        border-radius: 16px;
-        padding: 22px;
-        margin-bottom: 16px;
-    }
-
-    .gepetto-welcome {
-        text-align: center;
-        padding: 70px 10px 35px 10px;
-    }
-
-    .gepetto-welcome h1 {
-        font-size: 38px;
-        color: #f1f5f9;
-    }
-
-    .gepetto-welcome p {
-        font-size: 16px;
-        color: #94a3b8;
-    }
-
-    div[data-testid="stChatMessage"] {
-        background: #111a2d;
-        border: 1px solid #202d45;
-        border-radius: 15px;
-        padding: 12px;
-        margin-bottom: 12px;
-    }
-
-    .stButton > button {
-        border-radius: 10px;
-        border: 1px solid #2c3b59;
-        background: #14213a;
-        color: #f1f5f9;
-        min-height: 40px;
-    }
-
-    .stButton > button:hover {
-        border-color: #7c9cff;
-        color: #ffffff;
-    }
-
-    [data-testid="stChatInput"] {
-        border-color: #344563;
-    }
-
-    footer {
-        visibility: hidden;
-    }
-
-    #MainMenu {
-        visibility: hidden;
-    }
-
-    .footer-gepetto {
-        text-align: center;
-        color: #71809b;
-        font-size: 12px;
-        padding: 22px 0 10px 0;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# =========================
-# SESSÃO
-# =========================
-
-if "usuario" not in st.session_state:
-    st.session_state.usuario = cookies.get("usuario", "")
-
-if "modo_auth" not in st.session_state:
-    st.session_state.modo_auth = "Entrar"
-
-if "chat_atual" not in st.session_state:
-    st.session_state.chat_atual = None
-
-if "confirmar_exclusao_conta" not in st.session_state:
-    st.session_state.confirmar_exclusao_conta = False
-
-
-# =========================
-# FUNÇÕES DE CONVERSA
-# =========================
-
-def criar_conversa(usuario):
-    novo_id = secrets.token_hex(8)
-
-    nova_conversa = {
-        "titulo": "Nova conversa",
-        "mensagens": [],
-        "criada_em": datetime.now().strftime("%d/%m/%Y %H:%M")
-    }
-
-    usuarios[usuario]["chats"][novo_id] = nova_conversa
-    salvar_usuarios(usuarios)
-
-    st.session_state.chat_atual = novo_id
-    return novo_id
-
-
-def obter_conversa(usuario, chat_id):
-    return usuarios[usuario]["chats"].get(chat_id)
-
-
-def excluir_conversa(usuario, chat_id):
-    usuarios[usuario]["chats"].pop(chat_id, None)
-    salvar_usuarios(usuarios)
-
-    if st.session_state.chat_atual == chat_id:
-        st.session_state.chat_atual = None
-
-
-def gerar_titulo(texto):
-    texto = " ".join(texto.strip().split())
-
-    if not texto:
-        return "Nova conversa"
-
-    if len(texto) > 32:
-        return texto[:32].rstrip() + "..."
-
-    return texto
-
-
-def responder_groq(mensagens):
-    historico = [
-        {
-            "role": "system",
-            "content": (
-                "Você é Gepetto AI, um assistente útil, amigável e direto. "
-                "Responda em português quando o usuário escrever em português. "
-                "Use respostas claras e evite textos desnecessariamente longos."
-            )
-        }
-    ]
-
-    for mensagem in mensagens:
-        if mensagem.get("role") in ("user", "assistant"):
-            conteudo = mensagem.get("content", "")
-            if isinstance(conteudo, str) and conteudo.strip():
-                historico.append({
-                    "role": mensagem["role"],
-                    "content": conteudo
-                })
-
-    resposta = cliente.chat.completions.create(
-        model=MODELO,
-        messages=historico,
-        temperature=0.7,
-        max_completion_tokens=2048
-    )
-
-    return resposta.choices[0].message.content or "Não consegui gerar uma resposta."
-
-
-# =========================
-# TELA DE LOGIN E CADASTRO
-# =========================
-
-def tela_autenticacao():
-    st.markdown(
-        '<div class="gepetto-logo">🤖 Gepetto AI</div>',
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        '<div class="gepetto-subtitle">Sua inteligência artificial pessoal</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown('<div class="gepetto-card">', unsafe_allow_html=True)
-    st.subheader("Bem-vindo ao Gepetto")
-
-    modo = st.radio(
-        "Escolha uma opção",
-        ["Entrar", "Criar conta"],
-        horizontal=True,
-        key="seletor_auth"
-    )
-
-    with st.form("formulario_auth"):
-        nome_usuario = st.text_input(
-            "Nome de usuário",
-            max_chars=30
-        ).strip().lower()
-
-        senha = st.text_input(
-            "Senha",
-            type="password"
-        )
-
-        if modo == "Criar conta":
-            confirmar_senha = st.text_input(
-                "Confirmar senha",
-                type="password"
-            )
+def verificar_senha(dados, senha):
+    try:
+        if "senha_salt" in dados and "senha_hash" in dados:
+            salt = str(dados["senha_salt"])
+            hash_salvo = str(dados["senha_hash"])
+        elif "salt" in dados and "senha" in dados:
+            salt = str(dados["salt"])
+            hash_salvo = str(dados["senha"])
         else:
-            confirmar_senha = senha
+            return False
 
-        enviado = st.form_submit_button(
-            "Entrar" if modo == "Entrar" else "Criar conta",
-            use_container_width=True
-        )
+        tentativa = hashlib.pbkdf2_hmac(
+            "sha256",
+            senha.encode("utf-8"),
+            salt.encode("utf-8"),
+            ITERACOES_PBKDF2,
+        ).hex()
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        return hmac.compare_digest(tentativa, hash_salvo)
 
-    if not enviado:
-        return
+    except (TypeError, ValueError, KeyError):
+        return False
 
-    if not nome_usuario or not senha:
-        st.error("Preencha o usuário e a senha.")
-        return
 
-    if len(nome_usuario) < 3:
-        st.error("O nome de usuário precisa ter pelo menos 3 caracteres.")
-        return
+# =========================
+# CADASTRO
+# =========================
+
+def criar_conta(usuario, senha):
+    usuario = usuario.strip()
+
+    if len(usuario) < 3:
+        return False, "O usuário precisa ter pelo menos 3 caracteres."
+
+    if len(usuario) > 30:
+        return False, "O usuário pode ter no máximo 30 caracteres."
+
+    if not all(c.isalnum() or c in "_-" for c in usuario):
+        return False, "Use apenas letras, números, _ ou - no usuário."
 
     if len(senha) < 6:
-        st.error("A senha precisa ter pelo menos 6 caracteres.")
-        return
+        return False, "A senha precisa ter pelo menos 6 caracteres."
 
-    if modo == "Criar conta":
-        if senha != confirmar_senha:
-            st.error("As senhas não são iguais.")
-            return
+    if caminho_usuario(usuario).exists():
+        return False, "Esse usuário já existe."
 
-        if nome_usuario in usuarios:
-            st.error("Esse nome de usuário já existe.")
-            return
+    salt, senha_hash = gerar_senha(senha)
 
-        salt, senha_hash = criar_hash(senha)
+    dados = {
+        "usuario": usuario,
+        "senha_salt": salt,
+        "senha_hash": senha_hash,
+        "chats": {},
+        "chat_atual": "",
+    }
 
-        usuarios[nome_usuario] = {
-            "salt": salt,
-            "senha_hash": senha_hash,
-            "chats": {}
-        }
+    if not salvar_dados(usuario, dados):
+        return False, "Não foi possível salvar a conta."
 
-        salvar_usuarios(usuarios)
-        cookies["usuario"] = nome_usuario
-        cookies.save()
+    return True, "Conta criada com sucesso!"
 
-        st.session_state.usuario = nome_usuario
-        st.session_state.chat_atual = None
+
+# =========================
+# SESSÃO E EXCLUSÃO
+# =========================
+
+def encerrar_sessao():
+    cookies[COOKIE_NOME] = ""
+    cookies.save()
+
+    st.session_state.usuario = ""
+    st.session_state.confirmar_exclusao = False
+    st.session_state.confirmar_exclusao_chat = False
+
+
+def excluir_conta(usuario):
+    caminho = caminho_usuario(usuario)
+
+    try:
+        if caminho.exists():
+            caminho.unlink()
+
+        encerrar_sessao()
         st.rerun()
 
+    except OSError:
+        st.error("Não foi possível excluir os dados da conta.")
+
+
+def excluir_chat(usuario, dados, nome_chat):
+    if nome_chat not in dados["chats"]:
+        return False
+
+    del dados["chats"][nome_chat]
+
+    if dados["chats"]:
+        dados["chat_atual"] = next(iter(dados["chats"]))
     else:
-        dados = usuarios.get(nome_usuario)
+        dados["chat_atual"] = ""
 
-        if not dados or not verificar_senha(
-            senha,
-            dados["salt"],
-            dados["senha_hash"]
-        ):
-            st.error("Usuário ou senha incorretos.")
-            return
+    return salvar_dados(usuario, dados)
 
-        cookies["usuario"] = nome_usuario
-        cookies.save()
 
-        st.session_state.usuario = nome_usuario
-        st.session_state.chat_atual = None
-        st.rerun()
+if "usuario" not in st.session_state:
+    st.session_state.usuario = cookies.get(COOKIE_NOME, "")
+
+if "confirmar_exclusao" not in st.session_state:
+    st.session_state.confirmar_exclusao = False
+
+if "confirmar_exclusao_chat" not in st.session_state:
+    st.session_state.confirmar_exclusao_chat = False
 
 
 # =========================
-# APLICATIVO PRINCIPAL
+# CABEÇALHO
 # =========================
 
-def aplicativo():
-    usuario = st.session_state.usuario
+st.title("🤖 Gepetto AI")
+st.caption("Uma inteligência artificial da Família Bezerra")
 
-    if usuario not in usuarios:
-        st.session_state.usuario = ""
-        cookies["usuario"] = ""
-        cookies.save()
-        st.rerun()
 
-    usuarios[usuario].setdefault("chats", {})
+# =========================
+# LOGIN E CADASTRO
+# =========================
 
-    with st.sidebar:
-        st.markdown(
-            '<div class="gepetto-logo">🤖 Gepetto</div>',
-            unsafe_allow_html=True
-        )
-        st.markdown(
-            '<div class="gepetto-subtitle">Inteligência artificial</div>',
-            unsafe_allow_html=True
-        )
+if not st.session_state.usuario:
+    aba_login, aba_cadastro = st.tabs(["Entrar", "Criar conta"])
 
-        if st.button("＋ Nova conversa", use_container_width=True):
-            criar_conversa(usuario)
-            st.rerun()
+    with aba_login:
+        st.subheader("Entrar na sua conta")
 
-        st.divider()
-        st.caption("SUAS CONVERSAS")
+        with st.form("form_login"):
+            login_usuario = st.text_input("Usuário", max_chars=30)
+            login_senha = st.text_input("Senha", type="password")
 
-        chats = usuarios[usuario]["chats"]
+            enviar_login = st.form_submit_button(
+                "Entrar",
+                use_container_width=True,
+            )
 
-        if not chats:
-            st.caption("Nenhuma conversa ainda.")
+        if enviar_login:
+            usuario_digitado = login_usuario.strip()
+            dados_login = carregar_dados(usuario_digitado)
 
-        for chat_id, conversa in reversed(list(chats.items())):
-            col1, col2 = st.columns([5, 1])
+            if dados_login and verificar_senha(dados_login, login_senha):
+                nome_autenticado = (
+                    dados_login.get("usuario") or usuario_digitado
+                )
 
-            with col1:
-                selecionado = st.session_state.chat_atual == chat_id
+                dados_login["usuario"] = nome_autenticado
 
-                if st.button(
-                    ("● " if selecionado else "　") + conversa.get(
-                        "titulo", "Nova conversa"
-                    ),
-                    key=f"abrir_{chat_id}",
-                    use_container_width=True
-                ):
-                    st.session_state.chat_atual = chat_id
+                if salvar_dados(nome_autenticado, dados_login):
+                    st.session_state.usuario = nome_autenticado
+                    cookies[COOKIE_NOME] = nome_autenticado
+                    cookies.save()
                     st.rerun()
+                else:
+                    st.error("Não foi possível atualizar os dados da conta.")
+            else:
+                st.error("Usuário ou senha incorretos.")
 
-            with col2:
-                if st.button("×", key=f"excluir_{chat_id}"):
-                    excluir_conversa(usuario, chat_id)
-                    st.rerun()
+    with aba_cadastro:
+        st.subheader("Criar sua conta")
 
-        st.divider()
-        st.caption(f"Conectado como **{usuario}**")
+        with st.form("form_cadastro"):
+            novo_usuario = st.text_input(
+                "Escolha um usuário",
+                max_chars=30,
+            )
+            nova_senha = st.text_input("Escolha uma senha", type="password")
+            confirmar_senha = st.text_input(
+                "Confirme a senha",
+                type="password",
+            )
 
-        if st.button("Sair da conta", use_container_width=True):
-            st.session_state.usuario = ""
-            st.session_state.chat_atual = None
-            cookies["usuario"] = ""
-            cookies.save()
+            enviar_cadastro = st.form_submit_button(
+                "Criar conta",
+                use_container_width=True,
+            )
+
+        if enviar_cadastro:
+            if nova_senha != confirmar_senha:
+                st.error("As senhas não são iguais.")
+            else:
+                sucesso, mensagem = criar_conta(
+                    novo_usuario,
+                    nova_senha,
+                )
+
+                if sucesso:
+                    st.success(mensagem)
+                    st.info("Agora entre na aba Entrar.")
+                else:
+                    st.error(mensagem)
+
+    st.stop()
+
+
+# =========================
+# CARREGAR CONTA
+# =========================
+
+usuario = st.session_state.usuario
+dados = carregar_dados(usuario)
+
+if dados is None:
+    encerrar_sessao()
+    st.warning("Não foi possível localizar os dados dessa conta. Entre novamente.")
+    st.rerun()
+
+dados["usuario"] = dados.get("usuario") or usuario
+
+if not salvar_dados(usuario, dados):
+    st.warning("Não foi possível atualizar o arquivo da conta.")
+
+
+# =========================
+# BARRA LATERAL
+# =========================
+
+with st.sidebar:
+    st.title("💬 Conversas")
+    st.caption(f"Conta: {usuario}")
+
+    nomes_chats = list(dados["chats"].keys())
+
+    if st.button("➕ Nova conversa", use_container_width=True):
+        numero = 1
+        nome = f"Conversa {numero}"
+
+        while nome in dados["chats"]:
+            numero += 1
+            nome = f"Conversa {numero}"
+
+        dados["chats"][nome] = []
+        dados["chat_atual"] = nome
+        st.session_state.confirmar_exclusao_chat = False
+
+        if salvar_dados(usuario, dados):
             st.rerun()
-
-        if st.button("Excluir minha conta", use_container_width=True):
-            st.session_state.confirmar_exclusao_conta = True
-
-        if st.session_state.confirmar_exclusao_conta:
-            st.warning("Isso apagará a conta e as conversas salvas.")
-
-            if st.button("Confirmar exclusão da conta", type="primary"):
-                usuarios.pop(usuario, None)
-                salvar_usuarios(usuarios)
-
-                st.session_state.usuario = ""
-                st.session_state.chat_atual = None
-                st.session_state.confirmar_exclusao_conta = False
-
-                cookies["usuario"] = ""
-                cookies.save()
-                st.rerun()
-
-            if st.button("Cancelar exclusão"):
-                st.session_state.confirmar_exclusao_conta = False
-                st.rerun()
-
-    # Seleciona ou cria a conversa
-    chat_id = st.session_state.chat_atual
-
-    if chat_id not in usuarios[usuario]["chats"]:
-        chat_id = None
-
-    if chat_id is None:
-        if usuarios[usuario]["chats"]:
-            chat_id = next(iter(usuarios[usuario]["chats"]))
-            st.session_state.chat_atual = chat_id
         else:
-            chat_id = criar_conversa(usuario)
+            st.error("Não foi possível criar a conversa.")
 
-    conversa = obter_conversa(usuario, chat_id)
+    if nomes_chats:
+        nomes_chats = list(dados["chats"].keys())
 
-    if conversa is None:
-        st.error("Não foi possível abrir esta conversa.")
-        return
+        if dados["chat_atual"] not in nomes_chats:
+            dados["chat_atual"] = nomes_chats[0]
 
-    st.title(conversa.get("titulo", "Nova conversa"))
-    st.caption("Converse com o Gepetto AI")
+        conversa_selecionada = st.selectbox(
+            "Escolha uma conversa",
+            nomes_chats,
+            index=nomes_chats.index(dados["chat_atual"]),
+        )
 
-    mensagens = conversa.setdefault("mensagens", [])
+        if conversa_selecionada != dados["chat_atual"]:
+            dados["chat_atual"] = conversa_selecionada
+            st.session_state.confirmar_exclusao_chat = False
 
-    if not mensagens:
-        st.markdown("""
-        <div class="gepetto-welcome">
-            <h1>Como posso ajudar?</h1>
-            <p>Faça uma pergunta para começar uma conversa.</p>
-        </div>
-        """, unsafe_allow_html=True)
+            if not salvar_dados(usuario, dados):
+                st.error("Não foi possível salvar a conversa.")
+
+            st.rerun()
+
+        if st.button("🗑️ Excluir conversa selecionada", use_container_width=True):
+            st.session_state.confirmar_exclusao_chat = True
+
+        if st.session_state.confirmar_exclusao_chat:
+            st.warning(
+                f"Excluir a conversa '{dados['chat_atual']}'? "
+                "Essa ação não pode ser desfeita."
+            )
+
+            if st.button("SIM, EXCLUIR CONVERSA", use_container_width=True):
+                nome_excluir = dados["chat_atual"]
+
+                if excluir_chat(usuario, dados, nome_excluir):
+                    st.session_state.confirmar_exclusao_chat = False
+                    st.rerun()
+                else:
+                    st.error("Não foi possível excluir a conversa.")
+
+            if st.button("Cancelar exclusão da conversa", use_container_width=True):
+                st.session_state.confirmar_exclusao_chat = False
+                st.rerun()
+    else:
+        st.info("Você ainda não tem conversas. Crie uma para começar.")
+
+    st.divider()
+
+    if st.button("🚪 Sair da conta", use_container_width=True):
+        encerrar_sessao()
+        st.rerun()
+
+    st.divider()
+
+    if st.button("🗑️ Excluir minha conta", use_container_width=True):
+        st.session_state.confirmar_exclusao = True
+
+    if st.session_state.confirmar_exclusao:
+        st.warning(
+            "Isso apagará a conta e todo o histórico deste armazenamento."
+        )
+
+        if st.button(
+            "SIM, EXCLUIR CONTA",
+            use_container_width=True,
+            type="primary",
+        ):
+            excluir_conta(usuario)
+
+        if st.button("Cancelar exclusão da conta", use_container_width=True):
+            st.session_state.confirmar_exclusao = False
+            st.rerun()
+
+
+# =========================
+# HISTÓRICO
+# =========================
+
+chat_atual = dados["chat_atual"]
+
+if chat_atual:
+    st.subheader(chat_atual)
+    mensagens = dados["chats"][chat_atual]
 
     for mensagem in mensagens:
-        papel = mensagem.get("role", "assistant")
-        conteudo = mensagem.get("content", "")
+        with st.chat_message(mensagem["role"]):
+            st.markdown(mensagem["content"])
+else:
+    st.info("Clique em 'Nova conversa' para começar.")
 
-        with st.chat_message(papel):
-            st.markdown(conteudo)
 
-    pergunta = st.chat_input("Envie uma mensagem para o Gepetto...")
+# =========================
+# ENVIAR MENSAGEM
+# =========================
 
-    if pergunta and pergunta.strip():
-        pergunta = pergunta.strip()
+pergunta = st.chat_input("Converse com o Gepetto...")
 
-        if not mensagens:
-            conversa["titulo"] = gerar_titulo(pergunta)
+if pergunta:
+    if not dados["chat_atual"]:
+        dados["chats"]["Nova conversa"] = []
+        dados["chat_atual"] = "Nova conversa"
 
-        mensagens.append({
-            "role": "user",
-            "content": pergunta
-        })
+    chat_antigo = dados["chat_atual"]
+    mensagens = dados["chats"][chat_antigo]
 
-        salvar_usuarios(usuarios)
+    # A primeira mensagem define o nome do chat.
+    if not mensagens:
+        nome_base = gerar_nome_chat(pergunta)
+        nome_novo = nome_chat_disponivel(
+            dados["chats"],
+            nome_base,
+            chat_original=chat_antigo,
+        )
 
-        with st.chat_message("user"):
-            st.markdown(pergunta)
+        dados["chats"][nome_novo] = mensagens
+
+        if nome_novo != chat_antigo:
+            del dados["chats"][chat_antigo]
+
+        dados["chat_atual"] = nome_novo
+
+    mensagens.append({
+        "role": "user",
+        "content": pergunta,
+    })
+
+    if not salvar_dados(usuario, dados):
+        st.error("Não foi possível salvar sua mensagem.")
+
+    st.rerun()
+
+
+# A resposta é gerada na execução seguinte quando há uma mensagem
+# de usuário ainda sem resposta do assistente.
+if dados["chat_atual"]:
+    mensagens = dados["chats"][dados["chat_atual"]]
+
+    if mensagens and mensagens[-1]["role"] == "user":
+        pergunta_pendente = mensagens[-1]["content"]
 
         with st.chat_message("assistant"):
-            with st.spinner("Gepetto está pensando..."):
-                try:
-                    resposta = responder_groq(mensagens)
+            area_resposta = st.empty()
 
-                    st.markdown(resposta)
+            try:
+                resposta = cliente.chat.completions.create(
+                    model=MODELO,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Você é Gepetto, uma IA prestativa, "
+                                "clara e educada. Responda em português "
+                                "quando o usuário escrever em português."
+                            ),
+                        },
+                        *mensagens,
+                    ],
+                    temperature=0.7,
+                    max_completion_tokens=2048,
+                )
 
-                    mensagens.append({
-                        "role": "assistant",
-                        "content": resposta
-                    })
+                texto = (
+                    resposta.choices[0].message.content
+                    or "Não consegui gerar uma resposta."
+                )
 
-                    salvar_usuarios(usuarios)
+                area_resposta.markdown(texto)
 
-                except Exception as erro:
-                    st.error(
-                        "Não consegui conectar à IA. "
-                        "Verifique a API Groq e tente novamente."
-                    )
-                    print(f"Erro da Groq: {erro}")
+                mensagens.append({
+                    "role": "assistant",
+                    "content": texto,
+                })
 
-        st.rerun()
+                if not salvar_dados(usuario, dados):
+                    st.error("Não foi possível salvar a resposta no histórico.")
 
-    st.markdown(
-        '<div class="footer-gepetto">Uma inteligência artificial da Família Bezerra</div>',
-        unsafe_allow_html=True
-    )
+            except Exception:
+                area_resposta.error(
+                    "Não consegui falar com a IA. "
+                    "Verifique a conexão e a configuração da Groq."
+                )
 
 
 # =========================
-# INICIALIZAÇÃO
+# RODAPÉ
 # =========================
 
-if st.session_state.usuario:
-    aplicativo()
-else:
-    tela_autenticacao()
+st.divider()
+st.caption(
+    "Gepetto AI • Uma inteligência artificial da Família Bezerra"
+)
