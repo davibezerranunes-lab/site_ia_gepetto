@@ -483,10 +483,6 @@ if "usuario" not in st.session_state:
     else:
         st.session_state.usuario = ""
 
-        cookies[COOKIE_NOME] = ""
-        cookies[COOKIE_TOKEN_NOME] = ""
-        cookies.save()
-
 
 if "confirmar_exclusao" not in st.session_state:
     st.session_state.confirmar_exclusao = False
