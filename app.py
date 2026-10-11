@@ -563,7 +563,7 @@ def aplicativo():
         with st.chat_message("assistant"):
             with st.spinner("Gepetto está pensando..."):
                 try:
-                    resposta = responder_gro q(mensagens)
+                    resposta = responder_groq(mensagens)
 
                     st.markdown(resposta)
 
