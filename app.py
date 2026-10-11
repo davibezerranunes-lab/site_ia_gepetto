@@ -1,3 +1,4 @@
+
 import json
 import hmac
 import hashlib
@@ -137,7 +138,6 @@ def carregar_dados(usuario):
 
         dados["usuario"] = dados.get("usuario") or usuario.strip()
 
-        # Compatibilidade com o formato de senhas atual e antigo.
         senha_valida = (
             isinstance(dados.get("senha_hash"), str)
             and (
@@ -152,7 +152,6 @@ def carregar_dados(usuario):
         chats_originais = dados.get("chats", {})
         chats = {}
 
-        # Formato antigo: dicionário de conversas.
         if isinstance(chats_originais, dict):
             for nome, mensagens in chats_originais.items():
                 if not isinstance(nome, str):
@@ -172,7 +171,6 @@ def carregar_dados(usuario):
                     and isinstance(m.get("content"), str)
                 ]
 
-        # Formato atual: lista de conversas com id, título e mensagens.
         elif isinstance(chats_originais, list):
             id_para_nome = {}
 
@@ -297,20 +295,15 @@ def verificar_senha(dados, senha):
             return False
 
         if isinstance(dados.get("senha_salt"), str):
-            # Compatibilidade com o formato legado.
             salt_bytes = dados["senha_salt"].encode("utf-8")
 
         elif isinstance(dados.get("salt"), str):
             salt = dados["salt"]
 
-            # O formato atual utiliza salt hexadecimal.
-            if "senha_hash" in dados:
-                try:
-                    salt_bytes = bytes.fromhex(salt)
-                except ValueError:
-                    return False
-            else:
-                salt_bytes = salt.encode("utf-8")
+            try:
+                salt_bytes = bytes.fromhex(salt)
+            except ValueError:
+                return False
 
         else:
             return False
@@ -576,7 +569,8 @@ def iniciar_verificacao(comando):
 
         st.success(
             f"Código enviado para {EMAIL_ADMIN}. "
-            "Digite o código de 6 dígitos na próxima mensagem."
+            "Digite o código de 6 dígitos na próxima mensagem. "
+            "Digite CANCELAR para voltar ao chat."
         )
 
     except Exception:
@@ -586,28 +580,29 @@ def iniciar_verificacao(comando):
         )
 
 
+def cancelar_verificacao():
+    st.session_state.aguardando_codigo = False
+    st.session_state.comando_pendente = None
+    st.session_state.codigo_admin_hash = ""
+    st.session_state.codigo_admin_expira = 0
+    st.session_state.codigo_admin_tentativas = 0
+
+
 def verificar_codigo(codigo):
     if time.time() > st.session_state.get(
         "codigo_admin_expira", 0
     ):
-        st.session_state.aguardando_codigo = False
-        st.session_state.comando_pendente = None
-        st.session_state.codigo_admin_hash = ""
+        cancelar_verificacao()
 
-        st.error("O código expirou. Envie o comando novamente.")
+        st.error(
+            "O código expirou. A verificação foi cancelada. "
+            "O chat está liberado."
+        )
         return False
 
     tentativas = st.session_state.get(
         "codigo_admin_tentativas", 0
     )
-
-    if tentativas >= 5:
-        st.session_state.aguardando_codigo = False
-        st.session_state.comando_pendente = None
-        st.session_state.codigo_admin_hash = ""
-
-        st.error("Limite de tentativas atingido. Envie o comando novamente.")
-        return False
 
     esperado = st.session_state.get("codigo_admin_hash", "")
 
@@ -623,8 +618,22 @@ def verificar_codigo(codigo):
 
         return True
 
-    st.session_state.codigo_admin_tentativas = tentativas + 1
-    st.error("Código incorreto.")
+    tentativas += 1
+    st.session_state.codigo_admin_tentativas = tentativas
+
+    if tentativas >= 5:
+        cancelar_verificacao()
+
+        st.error(
+            "Você errou 5 vezes. A verificação foi cancelada "
+            "e o chat está liberado."
+        )
+    else:
+        st.error(
+            f"Código incorreto. Tentativa {tentativas}/5. "
+            "Tente novamente ou digite CANCELAR para voltar ao chat."
+        )
+
     return False
 
 
@@ -677,6 +686,15 @@ if "aguardando_codigo" not in st.session_state:
 
 if "comando_pendente" not in st.session_state:
     st.session_state.comando_pendente = None
+
+if "codigo_admin_hash" not in st.session_state:
+    st.session_state.codigo_admin_hash = ""
+
+if "codigo_admin_expira" not in st.session_state:
+    st.session_state.codigo_admin_expira = 0
+
+if "codigo_admin_tentativas" not in st.session_state:
+    st.session_state.codigo_admin_tentativas = 0
 
 if "resposta_modo_admin" not in st.session_state:
     st.session_state.resposta_modo_admin = False
@@ -932,6 +950,12 @@ if pergunta:
     # -----------------------------------------------------
 
     if st.session_state.aguardando_codigo:
+
+        if texto.casefold() == "cancelar":
+            cancelar_verificacao()
+            st.info("Verificação cancelada. Você pode conversar normalmente.")
+            st.rerun()
+
         if verificar_codigo(texto):
             comando = st.session_state.comando_pendente
             st.session_state.comando_pendente = None
@@ -941,7 +965,17 @@ if pergunta:
             elif comando == "20456742v2":
                 mostrar_requirements()
 
-        st.stop()
+            # Evita que o código de verificação seja enviado à IA.
+            st.stop()
+
+        # Se a verificação foi cancelada por expiração ou 5 erros,
+        # não bloqueia permanentemente as próximas mensagens.
+        if st.session_state.aguardando_codigo:
+            st.stop()
+
+        # A verificação foi cancelada nesta tentativa.
+        # A mensagem que causou o cancelamento não é enviada à IA.
+        st.rerun()
 
     # -----------------------------------------------------
     # COMANDOS EXATOS COM VERIFICAÇÃO
@@ -959,8 +993,6 @@ if pergunta:
     # MODO ADMIN: SOMENTE "2045 pergunta"
     # -----------------------------------------------------
 
-    # Não ativa se 2045 aparecer no meio da frase.
-    # Não permanece ativado para a mensagem seguinte.
     modo_admin_desta_resposta = texto.startswith("2045 ")
 
     if modo_admin_desta_resposta:
@@ -1098,7 +1130,6 @@ if dados["chat_atual"]:
                 )
 
             finally:
-                # O modo admin vale somente para esta resposta.
                 st.session_state.resposta_modo_admin = False
 
 
