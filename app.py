@@ -1,14 +1,13 @@
 
+import json
 import hmac
 import hashlib
 import secrets
+from pathlib import Path
 
 import streamlit as st
-import psycopg
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
-from psycopg.errors import UniqueViolation
 
+# Compatibilidade com bibliotecas que usam st.cache.
 if not hasattr(st, "cache"):
     st.cache = st.cache_data
 
@@ -26,25 +25,16 @@ st.set_page_config(
     layout="centered",
 )
 
+PASTA_DADOS = Path("dados_usuarios")
+PASTA_DADOS.mkdir(parents=True, exist_ok=True)
+
 COOKIE_NOME = "gepetto_usuario"
 ITERACOES_PBKDF2 = 200_000
 MODELO = "openai/gpt-oss-20b"
 
 
 # =========================
-# CONEXÃO COM SUPABASE
-# =========================
-
-def conectar_db():
-    return psycopg.connect(
-        st.secrets["DATABASE_URL"],
-        row_factory=dict_row,
-        connect_timeout=15,
-    )
-
-
-# =========================
-# COOKIES
+# COOKIES: LOGIN PERSISTENTE
 # =========================
 
 try:
@@ -59,7 +49,7 @@ try:
 except Exception:
     st.error(
         "Não foi possível inicializar os cookies. "
-        "Confira COOKIES_PASSWORD e as dependências."
+        "Confira COOKIES_PASSWORD nos Secrets."
     )
     st.stop()
 
@@ -73,128 +63,119 @@ try:
 except Exception:
     st.error(
         "Não foi possível configurar a IA. "
-        "Confira GROQ_API_KEY nos Secrets."
+        "Confira GROQ_API_KEY nos Secrets do Streamlit."
     )
     st.stop()
 
 
 # =========================
-# VALIDAR E ORGANIZAR CHATS
+# ARQUIVOS E USUÁRIOS
 # =========================
 
-def normalizar_chats(chats):
-    if not isinstance(chats, dict):
-        chats = {}
+def caminho_usuario(usuario):
+    identificador = hashlib.sha256(
+        usuario.strip().lower().encode("utf-8")
+    ).hexdigest()
 
-    chats_validos = {}
+    return PASTA_DADOS / f"{identificador}.json"
 
-    for nome, mensagens in chats.items():
-        if not isinstance(nome, str):
-            continue
-
-        if not isinstance(mensagens, list):
-            mensagens = []
-
-        mensagens_validas = []
-
-        for mensagem in mensagens:
-            if not isinstance(mensagem, dict):
-                continue
-
-            papel = mensagem.get("role")
-            conteudo = mensagem.get("content")
-
-            if papel not in ("user", "assistant"):
-                continue
-
-            if not isinstance(conteudo, str):
-                continue
-
-            mensagens_validas.append({
-                "role": papel,
-                "content": conteudo,
-            })
-
-        chats_validos[nome] = mensagens_validas
-
-    if not chats_validos:
-        chats_validos = {"Conversa 1": []}
-
-    return chats_validos
-
-
-# =========================
-# CARREGAR E SALVAR CONTAS
-# =========================
 
 def carregar_dados(usuario):
-    usuario = usuario.strip()
+    caminho = caminho_usuario(usuario)
 
-    if not usuario:
+    if not caminho.exists():
         return None
 
-    with conectar_db() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT usuario, senha_salt, senha_hash,
-                       chats, chat_atual
-                FROM public.gepetto_usuarios
-                WHERE LOWER(usuario) = LOWER(%s)
-                LIMIT 1
-                """,
-                (usuario,),
-            )
-            dados = cursor.fetchone()
+    try:
+        with caminho.open("r", encoding="utf-8") as arquivo:
+            dados = json.load(arquivo)
 
-    if not dados:
+        if not isinstance(dados, dict):
+            return None
+
+        if not dados.get("usuario"):
+            dados["usuario"] = usuario.strip()
+
+        chats = dados.get("chats")
+
+        if not isinstance(chats, dict):
+            chats = {}
+
+        chats_validos = {}
+
+        for nome, mensagens in chats.items():
+            if not isinstance(nome, str):
+                continue
+
+            if not isinstance(mensagens, list):
+                mensagens = []
+
+            mensagens_validas = []
+
+            for mensagem in mensagens:
+                if not isinstance(mensagem, dict):
+                    continue
+
+                papel = mensagem.get("role")
+                conteudo = mensagem.get("content")
+
+                if papel not in ("user", "assistant"):
+                    continue
+
+                if not isinstance(conteudo, str):
+                    continue
+
+                mensagens_validas.append({
+                    "role": papel,
+                    "content": conteudo,
+                })
+
+            chats_validos[nome] = mensagens_validas
+
+        if not chats_validos:
+            chats_validos = {"Conversa 1": []}
+
+        dados["chats"] = chats_validos
+
+        chat_atual = dados.get("chat_atual")
+
+        if (
+            not isinstance(chat_atual, str)
+            or chat_atual not in chats_validos
+        ):
+            chat_atual = next(iter(chats_validos))
+
+        dados["chat_atual"] = chat_atual
+
+        return dados
+
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return None
-
-    dados = dict(dados)
-    dados["chats"] = normalizar_chats(dados.get("chats"))
-
-    chat_atual = dados.get("chat_atual")
-
-    if (
-        not isinstance(chat_atual, str)
-        or chat_atual not in dados["chats"]
-    ):
-        chat_atual = next(iter(dados["chats"]))
-
-    dados["chat_atual"] = chat_atual
-
-    return dados
 
 
 def salvar_dados(usuario, dados):
+    caminho = caminho_usuario(usuario)
+    temporario = caminho.with_suffix(".tmp")
+
     try:
-        chats = normalizar_chats(dados.get("chats"))
-        chat_atual = dados.get("chat_atual")
+        with temporario.open("w", encoding="utf-8") as arquivo:
+            json.dump(
+                dados,
+                arquivo,
+                ensure_ascii=False,
+                indent=2,
+            )
 
-        if chat_atual not in chats:
-            chat_atual = next(iter(chats))
+        temporario.replace(caminho)
+        return True
 
-        with conectar_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    UPDATE public.gepetto_usuarios
-                    SET chats = %s,
-                        chat_atual = %s
-                    WHERE LOWER(usuario) = LOWER(%s)
-                    """,
-                    (
-                        Jsonb(chats),
-                        chat_atual,
-                        usuario.strip(),
-                    ),
-                )
+    except OSError:
+        try:
+            if temporario.exists():
+                temporario.unlink()
+        except OSError:
+            pass
 
-                atualizado = cursor.rowcount > 0
-
-        return atualizado
-
-    except Exception:
         return False
 
 
@@ -217,8 +198,16 @@ def gerar_senha(senha):
 
 def verificar_senha(dados, senha):
     try:
-        salt = str(dados["senha_salt"])
-        hash_salvo = str(dados["senha_hash"])
+        if "senha_salt" in dados and "senha_hash" in dados:
+            salt = str(dados["senha_salt"])
+            hash_salvo = str(dados["senha_hash"])
+
+        elif "salt" in dados and "senha" in dados:
+            salt = str(dados["salt"])
+            hash_salvo = str(dados["senha"])
+
+        else:
+            return False
 
         tentativa = hashlib.pbkdf2_hmac(
             "sha256",
@@ -252,41 +241,27 @@ def criar_conta(usuario, senha):
     if len(senha) < 6:
         return False, "A senha precisa ter pelo menos 6 caracteres."
 
-    salt, senha_hash = gerar_senha(senha)
-
-    try:
-        with conectar_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO public.gepetto_usuarios
-                        (usuario, senha_salt, senha_hash,
-                         chats, chat_atual)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (
-                        usuario,
-                        salt,
-                        senha_hash,
-                        Jsonb({"Conversa 1": []}),
-                        "Conversa 1",
-                    ),
-                )
-
-        return True, "Conta criada com sucesso!"
-
-    except UniqueViolation:
+    if caminho_usuario(usuario).exists():
         return False, "Esse usuário já existe."
 
-    except Exception:
-        return False, (
-            "Não foi possível criar a conta no banco. "
-            "Confira DATABASE_URL nos Secrets."
-        )
+    salt, senha_hash = gerar_senha(senha)
+
+    dados = {
+        "usuario": usuario,
+        "senha_salt": salt,
+        "senha_hash": senha_hash,
+        "chats": {"Conversa 1": []},
+        "chat_atual": "Conversa 1",
+    }
+
+    if not salvar_dados(usuario, dados):
+        return False, "Não foi possível salvar a conta."
+
+    return True, "Conta criada com sucesso!"
 
 
 # =========================
-# SESSÃO E EXCLUSÃO
+# SESSÃO E COOKIES
 # =========================
 
 def encerrar_sessao():
@@ -298,22 +273,17 @@ def encerrar_sessao():
 
 
 def excluir_conta(usuario):
+    caminho = caminho_usuario(usuario)
+
     try:
-        with conectar_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    DELETE FROM public.gepetto_usuarios
-                    WHERE LOWER(usuario) = LOWER(%s)
-                    """,
-                    (usuario.strip(),),
-                )
+        if caminho.exists():
+            caminho.unlink()
 
         encerrar_sessao()
         st.rerun()
 
-    except Exception:
-        st.error("Não foi possível excluir a conta. Tente novamente.")
+    except OSError:
+        st.error("Não foi possível excluir os dados da conta.")
 
 
 if "usuario" not in st.session_state:
@@ -336,23 +306,14 @@ st.caption("Uma inteligência artificial da Família Bezerra")
 # =========================
 
 if not st.session_state.usuario:
-    aba_login, aba_cadastro = st.tabs(
-        ["Entrar", "Criar conta"]
-    )
+    aba_login, aba_cadastro = st.tabs(["Entrar", "Criar conta"])
 
     with aba_login:
         st.subheader("Entrar na sua conta")
 
         with st.form("form_login"):
-            login_usuario = st.text_input(
-                "Usuário",
-                max_chars=30,
-            )
-
-            login_senha = st.text_input(
-                "Senha",
-                type="password",
-            )
+            login_usuario = st.text_input("Usuário", max_chars=30)
+            login_senha = st.text_input("Senha", type="password")
 
             enviar_login = st.form_submit_button(
                 "Entrar",
@@ -361,28 +322,24 @@ if not st.session_state.usuario:
 
         if enviar_login:
             usuario_digitado = login_usuario.strip()
+            dados_login = carregar_dados(usuario_digitado)
 
-            try:
-                dados_login = carregar_dados(usuario_digitado)
+            if dados_login and verificar_senha(dados_login, login_senha):
+                nome_autenticado = (
+                    dados_login.get("usuario") or usuario_digitado
+                )
 
-                if dados_login and verificar_senha(
-                    dados_login,
-                    login_senha,
-                ):
-                    nome = dados_login["usuario"]
+                dados_login["usuario"] = nome_autenticado
 
-                    st.session_state.usuario = nome
-                    cookies[COOKIE_NOME] = nome
+                if salvar_dados(nome_autenticado, dados_login):
+                    st.session_state.usuario = nome_autenticado
+                    cookies[COOKIE_NOME] = nome_autenticado
                     cookies.save()
                     st.rerun()
                 else:
-                    st.error("Usuário ou senha incorretos.")
-
-            except Exception:
-                st.error(
-                    "Não foi possível acessar o banco de dados. "
-                    "Confira DATABASE_URL nos Secrets."
-                )
+                    st.error("Não foi possível atualizar os dados da conta.")
+            else:
+                st.error("Usuário ou senha incorretos.")
 
     with aba_cadastro:
         st.subheader("Criar sua conta")
@@ -392,12 +349,7 @@ if not st.session_state.usuario:
                 "Escolha um usuário",
                 max_chars=30,
             )
-
-            nova_senha = st.text_input(
-                "Escolha uma senha",
-                type="password",
-            )
-
+            nova_senha = st.text_input("Escolha uma senha", type="password")
             confirmar_senha = st.text_input(
                 "Confirme a senha",
                 type="password",
@@ -412,54 +364,38 @@ if not st.session_state.usuario:
             if nova_senha != confirmar_senha:
                 st.error("As senhas não são iguais.")
             else:
-                try:
-                    sucesso, mensagem = criar_conta(
-                        novo_usuario,
-                        nova_senha,
-                    )
+                sucesso, mensagem = criar_conta(
+                    novo_usuario,
+                    nova_senha,
+                )
 
-                    if sucesso:
-                        st.success(mensagem)
-                        st.info("Agora entre na aba Entrar.")
-                    else:
-                        st.error(mensagem)
-
-                except Exception:
-                    st.error(
-                        "Não foi possível conectar ao banco. "
-                        "Confira DATABASE_URL nos Secrets."
-                    )
+                if sucesso:
+                    st.success(mensagem)
+                    st.info("Agora entre na aba Entrar.")
+                else:
+                    st.error(mensagem)
 
     st.stop()
 
 
 # =========================
-# CARREGAR CONTA LOGADA
+# CARREGAR CONTA
 # =========================
 
 usuario = st.session_state.usuario
-
-try:
-    dados = carregar_dados(usuario)
-except Exception:
-    st.error(
-        "Não foi possível conectar ao banco de dados. "
-        "Confira DATABASE_URL nos Secrets do Streamlit."
-    )
-    st.stop()
+dados = carregar_dados(usuario)
 
 if dados is None:
     encerrar_sessao()
     st.warning(
-        "A conta não foi encontrada no banco. "
-        "Entre novamente."
+        "Não foi possível localizar os dados dessa conta. Entre novamente."
     )
     st.rerun()
 
-usuario = dados["usuario"]
+dados["usuario"] = dados.get("usuario") or usuario
 
 if not salvar_dados(usuario, dados):
-    st.warning("Não foi possível salvar as alterações no banco.")
+    st.warning("Não foi possível atualizar o arquivo da conta.")
 
 
 # =========================
@@ -486,10 +422,7 @@ with st.sidebar:
 
         st.rerun()
 
-    if st.button(
-        "➕ Nova conversa",
-        use_container_width=True,
-    ):
+    if st.button("➕ Nova conversa", use_container_width=True):
         numero = 1
 
         while f"Conversa {numero}" in dados["chats"]:
@@ -506,25 +439,19 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button(
-        "🚪 Sair da conta",
-        use_container_width=True,
-    ):
+    if st.button("🚪 Sair da conta", use_container_width=True):
         encerrar_sessao()
         st.rerun()
 
     st.divider()
 
-    if st.button(
-        "🗑️ Excluir minha conta",
-        use_container_width=True,
-    ):
+    if st.button("🗑️ Excluir minha conta", use_container_width=True):
         st.session_state.confirmar_exclusao = True
 
     if st.session_state.confirmar_exclusao:
         st.warning(
-            "Isso apagará a conta e todas as conversas salvas. "
-            "Essa ação não pode ser desfeita."
+            "Isso apagará a conta e o histórico de conversas "
+            "deste armazenamento. Essa ação não pode ser desfeita."
         )
 
         if st.button(
@@ -534,10 +461,7 @@ with st.sidebar:
         ):
             excluir_conta(usuario)
 
-        if st.button(
-            "Cancelar exclusão",
-            use_container_width=True,
-        ):
+        if st.button("Cancelar exclusão", use_container_width=True):
             st.session_state.confirmar_exclusao = False
             st.rerun()
 
@@ -567,8 +491,7 @@ if pergunta:
         "content": pergunta,
     })
 
-    if not salvar_dados(usuario, dados):
-        st.error("Não foi possível salvar sua mensagem no banco.")
+    salvar_dados(usuario, dados)
 
     with st.chat_message("user"):
         st.markdown(pergunta)
