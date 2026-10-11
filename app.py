@@ -6,6 +6,8 @@ import time
 import hmac
 import hashlib
 import secrets
+import uuid
+from datetime import datetime
 
 import streamlit as st
 from groq import Groq
@@ -17,41 +19,40 @@ from streamlit_cookies_manager import EncryptedCookieManager
 st.set_page_config(
     page_title="Gepeto AI",
     page_icon="🤖",
-    layout="centered"
+    layout="wide"
 )
 
 PASTA_DADOS = "dados_usuarios"
 COOKIE_NOME = "gepetto_auth"
-DURACAO_COOKIE = 30 * 24 * 60 * 60
-
 os.makedirs(PASTA_DADOS, exist_ok=True)
 
+INSTRUCOES_SISTEMA = {
+    "role": "system",
+    "content": (
+        "Você é o GEPETTO, uma inteligência artificial "
+        "acolhedora e ajudadora. Responda sempre em português "
+        "do Brasil. Seja amigável, prestativo e preciso. "
+        "Quando a resposta for longa, RESUMA."
+    )
+}
+
 # ==================================================
-# COOKIES CRIPTOGRAFADOS
+# COOKIES
 # ==================================================
 try:
     senha_cookies = str(st.secrets["COOKIES_PASSWORD"])
-
-    if len(senha_cookies) < 32:
-        st.error(
-            "COOKIES_PASSWORD precisa ter pelo menos "
-            "32 caracteres. Configure em Settings > Secrets."
-        )
-        st.stop()
 
     cookies = EncryptedCookieManager(
         prefix="gepetto-ai/",
         password=senha_cookies
     )
-
 except Exception:
     st.error(
         "Configure COOKIES_PASSWORD em "
-        "Streamlit Cloud > Settings > Secrets."
+        "Settings > Secrets no Streamlit Cloud."
     )
     st.stop()
 
-# Aguarda o navegador disponibilizar os cookies.
 if not cookies.ready():
     st.info("Carregando sua sessão...")
     st.stop()
@@ -67,511 +68,389 @@ def get_groq_client(api_key):
 def obter_cliente():
     try:
         chave = str(st.secrets["GROQ_API_KEY"]).strip()
-        if chave:
-            return get_groq_client(chave)
+        return get_groq_client(chave) if chave else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 client = obter_cliente()
 
 # ==================================================
-# PERSONALIDADE DO GEPETTO
-# ==================================================
-INSTRUCOES_SISTEMA = {
-    "role": "system",
-    "content": (
-        "Você é o GEPETTO, uma inteligência artificial "
-        "acolhedora e ajudadora. Responda sempre em português "
-        "do Brasil. Seja amigável, prestativo e preciso. "
-        "Quando a resposta for longa, RESUMA."
-    )
-}
-
-
-# ==================================================
-# USUÁRIOS E ARQUIVOS
+# CONTAS E ARQUIVOS
 # ==================================================
 def obter_nome_arquivo(apelido):
-    nome_limpo = re.sub(
+    nome = re.sub(
         r"[^a-zA-Z0-9_-]",
         "",
         apelido.strip().lower()
     )
-
-    if not nome_limpo:
+    if not nome:
         raise ValueError("Apelido inválido.")
-
-    return os.path.join(
-        PASTA_DADOS,
-        f"historico_{nome_limpo}.json"
-    )
+    return os.path.join(PASTA_DADOS, f"historico_{nome}.json")
 
 
 def gerar_hash_senha(senha):
     salt = os.urandom(16)
-
     derivacao = hashlib.pbkdf2_hmac(
-        "sha256",
-        senha.encode("utf-8"),
-        salt,
-        200000
+        "sha256", senha.encode(), salt, 200000
     )
-
     return salt.hex() + ":" + derivacao.hex()
 
 
-def verificar_senha(senha, senha_salva):
-    # Compatibilidade com contas antigas.
-    if ":" not in senha_salva:
-        return hmac.compare_digest(senha, senha_salva)
-
+def verificar_senha(senha, salva):
+    if ":" not in salva:
+        return hmac.compare_digest(senha, salva)
     try:
-        salt_hex, hash_salvo = senha_salva.split(":", 1)
-        salt = bytes.fromhex(salt_hex)
-
+        salt_hex, hash_salvo = salva.split(":", 1)
         derivacao = hashlib.pbkdf2_hmac(
             "sha256",
-            senha.encode("utf-8"),
-            salt,
+            senha.encode(),
+            bytes.fromhex(salt_hex),
             200000
         ).hex()
-
         return hmac.compare_digest(derivacao, hash_salvo)
-
     except (ValueError, TypeError):
         return False
 
 
 def hash_token(token):
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
-def carregar_dados_usuario(arquivo):
+def novo_chat():
+    return {
+        "id": uuid.uuid4().hex,
+        "titulo": "Novo chat",
+        "criado": datetime.now().isoformat(timespec="seconds"),
+        "historico": [INSTRUCOES_SISTEMA.copy()]
+    }
+
+
+def carregar_dados(arquivo):
     if not os.path.exists(arquivo):
         return None
-
     try:
         with open(arquivo, "r", encoding="utf-8") as f:
-            return json.load(f)
+            dados = json.load(f)
+
+        # Migra automaticamente contas do formato antigo.
+        if "chats" not in dados:
+            historico_antigo = dados.pop("historico", [])
+            if historico_antigo:
+                titulo = "Conversa antiga"
+                for m in historico_antigo:
+                    if m.get("role") == "user":
+                        titulo = m.get("content", titulo)[:35]
+                        break
+                dados["chats"] = [{
+                    "id": uuid.uuid4().hex,
+                    "titulo": titulo,
+                    "criado": datetime.now().isoformat(timespec="seconds"),
+                    "historico": historico_antigo
+                }]
+            else:
+                dados["chats"] = [novo_chat()]
+
+        if not dados["chats"]:
+            dados["chats"] = [novo_chat()]
+
+        return dados
     except (json.JSONDecodeError, OSError):
         return None
 
 
-def salvar_dados_usuario(
-    arquivo,
-    senha_salva,
-    historico,
-    token_hash=None
-):
-    dados_antigos = carregar_dados_usuario(arquivo) or {}
-
-    if token_hash is None:
-        token_hash = dados_antigos.get("token_hash", "")
-
-    dados = {
-        "senha": senha_salva,
-        "historico": historico,
-        "token_hash": token_hash
-    }
-
+def salvar_dados(arquivo, dados):
     temporario = arquivo + ".tmp"
-
     with open(temporario, "w", encoding="utf-8") as f:
-        json.dump(
-            dados,
-            f,
-            ensure_ascii=False,
-            indent=4
-        )
-
+        json.dump(dados, f, ensure_ascii=False, indent=2)
     os.replace(temporario, arquivo)
 
 
-def criar_historico():
-    return [INSTRUCOES_SISTEMA.copy()]
+def criar_conta(arquivo, senha):
+    dados = {
+        "senha": gerar_hash_senha(senha),
+        "token_hash": "",
+        "chats": [novo_chat()]
+    }
+    salvar_dados(arquivo, dados)
+    return dados
 
 
 # ==================================================
-# SESSÃO E AUTENTICAÇÃO
+# LOGIN PERSISTENTE
 # ==================================================
-def limpar_sessao():
-    st.session_state.autenticado = False
-    st.session_state.historico = []
-    st.session_state.nome_arquivo = ""
-    st.session_state.apelido = ""
-    st.session_state.confirmar_exclusao = False
-
-
-def autenticar_usuario(arquivo, apelido, dados):
-    historico = dados.get("historico", criar_historico())
-
-    if not historico:
-        historico = criar_historico()
-
+def entrar_sessao(arquivo, apelido, dados):
     st.session_state.autenticado = True
-    st.session_state.historico = historico
-    st.session_state.nome_arquivo = arquivo
     st.session_state.apelido = apelido
-
-
-def criar_cookie_login(arquivo, apelido, dados):
-    # Token imprevisível. O arquivo guarda somente seu hash.
-    token = secrets.token_urlsafe(32)
-
-    senha_salva = dados.get("senha", "")
-    historico = dados.get("historico", criar_historico())
-
-    salvar_dados_usuario(
-        arquivo,
-        senha_salva,
-        historico,
-        token_hash=hash_token(token)
-    )
-
-    cookies[COOKIE_NOME] = token
-    cookies.save()
-
-    autenticar_usuario(arquivo, apelido, dados)
+    st.session_state.nome_arquivo = arquivo
+    st.session_state.chat_id = dados["chats"][0]["id"]
 
 
 def restaurar_login():
     try:
         token = cookies.get(COOKIE_NOME)
+        if not token:
+            return
 
-        if not token or not isinstance(token, str):
-            return False
-
-        token_procurado = hash_token(token)
+        procurado = hash_token(token)
 
         for nome in os.listdir(PASTA_DADOS):
-            if (
-                not nome.startswith("historico_")
-                or not nome.endswith(".json")
-            ):
+            if not nome.startswith("historico_") or not nome.endswith(".json"):
                 continue
 
             arquivo = os.path.join(PASTA_DADOS, nome)
-            dados = carregar_dados_usuario(arquivo)
-
+            dados = carregar_dados(arquivo)
             if not dados:
                 continue
 
-            token_salvo = dados.get("token_hash", "")
-
-            if (
-                token_salvo
-                and hmac.compare_digest(
-                    str(token_salvo),
-                    token_procurado
-                )
-            ):
-                apelido = nome[
-                    len("historico_"):-len(".json")
-                ]
-
-                autenticar_usuario(
-                    arquivo,
-                    apelido,
-                    dados
-                )
-
-                return True
-
+            salvo = dados.get("token_hash", "")
+            if salvo and hmac.compare_digest(str(salvo), procurado):
+                apelido = nome[len("historico_"):-len(".json")]
+                entrar_sessao(arquivo, apelido, dados)
+                return
     except Exception:
-        return False
+        pass
 
-    return False
+
+def criar_login(arquivo, apelido, dados):
+    token = secrets.token_urlsafe(32)
+    dados["token_hash"] = hash_token(token)
+    salvar_dados(arquivo, dados)
+
+    cookies[COOKIE_NOME] = token
+    cookies.save()
+
+    entrar_sessao(arquivo, apelido, dados)
+
+
+def sair():
+    arquivo = st.session_state.get("nome_arquivo", "")
+    dados = carregar_dados(arquivo) if arquivo else None
+
+    if dados:
+        dados["token_hash"] = ""
+        salvar_dados(arquivo, dados)
+
+    try:
+        if COOKIE_NOME in cookies:
+            del cookies[COOKIE_NOME]
+        cookies.save()
+    except Exception:
+        pass
+
+    for chave in (
+        "autenticado", "apelido", "nome_arquivo", "chat_id"
+    ):
+        st.session_state.pop(chave, None)
 
 
 # ==================================================
-# INICIALIZAÇÃO
+# ESTADO
 # ==================================================
 if "autenticado" not in st.session_state:
-    limpar_sessao()
+    st.session_state.autenticado = False
 
-# Só tenta restaurar se esta sessão ainda não entrou.
 if not st.session_state.autenticado:
     restaurar_login()
 
 # ==================================================
-# CABEÇALHO
+# FUNÇÕES DE CONVERSA
 # ==================================================
-st.title("🤖 GEPETTO - Assistente Virtual")
-st.write("---")
+def dados_atuais():
+    return carregar_dados(st.session_state.nome_arquivo)
+
+
+def salvar_conversas(dados):
+    salvar_dados(st.session_state.nome_arquivo, dados)
+
+
+def chat_atual(dados):
+    chat_id = st.session_state.get("chat_id")
+    for chat in dados["chats"]:
+        if chat["id"] == chat_id:
+            return chat
+    st.session_state.chat_id = dados["chats"][0]["id"]
+    return dados["chats"][0]
+
+
+def criar_novo_chat():
+    dados = dados_atuais()
+    chat = novo_chat()
+    dados["chats"].insert(0, chat)
+    salvar_conversas(dados)
+    st.session_state.chat_id = chat["id"]
+
 
 # ==================================================
-# LOGIN E CADASTRO
+# TELA DE LOGIN E CADASTRO
 # ==================================================
+st.title("🤖 GEPETTO")
+st.caption("Seu assistente virtual pessoal")
+
 if not st.session_state.autenticado:
-
-    conhece = st.radio(
-        "Você já me conhece?",
-        ("Selecione uma opção", "Sim", "Não")
+    modo = st.radio(
+        "Bem-vindo!",
+        ["Entrar", "Criar conta"],
+        horizontal=True
     )
 
-    if conhece == "Sim":
-        apelido_input = st.text_input(
-            "Digite seu apelido:"
-        ).strip()
+    apelido = st.text_input("Apelido").strip()
+    senha = st.text_input("Senha", type="password")
 
-        senha_input = st.text_input(
-            "Digite sua senha:",
-            type="password"
-        )
+    if modo == "Criar conta":
+        confirmar = st.text_input("Confirme a senha", type="password")
 
-        if st.button("Entrar", use_container_width=True):
-            if not apelido_input or not senha_input:
+        if st.button("Criar conta", use_container_width=True):
+            if not apelido or not senha:
                 st.warning("Preencha o apelido e a senha.")
-
+            elif senha != confirmar:
+                st.error("As senhas não coincidem.")
+            elif len(senha) < 4:
+                st.warning("Use pelo menos 4 caracteres.")
             else:
                 try:
-                    arquivo = obter_nome_arquivo(apelido_input)
-                    dados = carregar_dados_usuario(arquivo)
-
-                    if dados is None:
-                        st.error(
-                            "Conta não encontrada. Confira o apelido "
-                            "ou selecione Não para criar uma conta."
-                        )
-
-                    elif verificar_senha(
-                        senha_input,
-                        str(dados.get("senha", ""))
-                    ):
-                        senha_salva = dados["senha"]
-
-                        # Converte senhas antigas em texto puro.
-                        if ":" not in senha_salva:
-                            senha_salva = gerar_hash_senha(
-                                senha_input
-                            )
-
-                        dados["senha"] = senha_salva
-
-                        # Cria uma sessão persistente no navegador.
-                        criar_cookie_login(
-                            arquivo,
-                            apelido_input,
-                            dados
-                        )
-
-                        st.success("Login realizado!")
-                        time.sleep(0.5)
-                        st.rerun()
-
-                    else:
-                        st.error("Senha incorreta!")
-
-                except Exception as erro:
-                    st.error(f"Erro ao entrar: {erro}")
-
-    elif conhece == "Não":
-        apelido_input = st.text_input(
-            "Escolha um apelido:"
-        ).strip()
-
-        senha_input = st.text_input(
-            "Crie uma senha de acesso:",
-            type="password"
-        )
-
-        confirmar_senha = st.text_input(
-            "Confirme sua senha:",
-            type="password"
-        )
-
-        if st.button(
-            "Criar Conta e Conversar",
-            use_container_width=True
-        ):
-            if not apelido_input or not senha_input:
-                st.warning("Preencha o apelido e crie uma senha.")
-
-            elif senha_input != confirmar_senha:
-                st.error("As senhas não são iguais.")
-
-            elif len(senha_input) < 4:
-                st.warning(
-                    "Use uma senha com pelo menos 4 caracteres."
-                )
-
-            else:
-                try:
-                    arquivo = obter_nome_arquivo(apelido_input)
-
+                    arquivo = obter_nome_arquivo(apelido)
                     if os.path.exists(arquivo):
-                        st.error(
-                            "Esse apelido já está em uso! "
-                            "Escolha outro ou faça login."
-                        )
-
+                        st.error("Esse apelido já está em uso.")
                     else:
-                        historico = criar_historico()
-                        senha_hash = gerar_hash_senha(senha_input)
-
-                        dados = {
-                            "senha": senha_hash,
-                            "historico": historico,
-                            "token_hash": ""
-                        }
-
-                        salvar_dados_usuario(
-                            arquivo,
-                            senha_hash,
-                            historico,
-                            token_hash=""
-                        )
-
-                        criar_cookie_login(
-                            arquivo,
-                            apelido_input,
-                            dados
-                        )
-
-                        st.success("Conta criada com sucesso!")
-                        time.sleep(0.5)
+                        dados = criar_conta(arquivo, senha)
+                        criar_login(arquivo, apelido, dados)
                         st.rerun()
-
                 except Exception as erro:
                     st.error(f"Erro ao criar conta: {erro}")
 
+    else:
+        if st.button("Entrar", use_container_width=True):
+            if not apelido or not senha:
+                st.warning("Preencha o apelido e a senha.")
+            else:
+                try:
+                    arquivo = obter_nome_arquivo(apelido)
+                    dados = carregar_dados(arquivo)
+
+                    if not dados:
+                        st.error("Conta não encontrada.")
+                    elif verificar_senha(senha, str(dados.get("senha", ""))):
+                        # Atualiza contas antigas com senha em texto puro.
+                        if ":" not in str(dados["senha"]):
+                            dados["senha"] = gerar_hash_senha(senha)
+                        criar_login(arquivo, apelido, dados)
+                        st.rerun()
+                    else:
+                        st.error("Senha incorreta.")
+                except Exception as erro:
+                    st.error(f"Erro ao entrar: {erro}")
+
+    st.stop()
+
 # ==================================================
-# CHAT
+# INTERFACE PRINCIPAL
 # ==================================================
-else:
-    st.subheader(
-        f"Conversando com {st.session_state.apelido}"
-    )
+dados = dados_atuais()
 
-    with st.sidebar:
-        st.write(f"Usuário: **{st.session_state.apelido}**")
+if not dados:
+    st.error("Não foi possível carregar sua conta.")
+    st.stop()
 
-        if st.button("Sair da Conta", use_container_width=True):
-            arquivo = st.session_state.nome_arquivo
-            dados = carregar_dados_usuario(arquivo)
+if not dados.get("chats"):
+    dados["chats"] = [novo_chat()]
+    salvar_conversas(dados)
 
-            # Invalida o token no servidor.
-            if dados:
-                salvar_dados_usuario(
-                    arquivo,
-                    dados.get("senha", ""),
-                    dados.get("historico", criar_historico()),
-                    token_hash=""
-                )
+with st.sidebar:
+    st.title("💬 Seus chats")
+    st.caption(f"Conta: {st.session_state.apelido}")
 
-            # Remove o cookie persistente.
-            try:
-                if COOKIE_NOME in cookies:
-                    del cookies[COOKIE_NOME]
-                cookies.save()
-            except Exception:
-                pass
+    if st.button("➕ Novo chat", use_container_width=True):
+        criar_novo_chat()
+        st.rerun()
 
-            limpar_sessao()
-            st.rerun()
+    st.divider()
 
-        st.write("---")
+    for chat in dados["chats"]:
+        titulo = chat.get("titulo", "Novo chat")
+        if len(titulo) > 30:
+            titulo = titulo[:30] + "…"
+
+        selecionado = chat["id"] == st.session_state.chat_id
 
         if st.button(
-            "🗑️ Deletar conta e histórico",
+            ("▶ " if selecionado else "　") + titulo,
+            key="abrir_" + chat["id"],
             use_container_width=True
         ):
-            st.session_state.confirmar_exclusao = True
+            st.session_state.chat_id = chat["id"]
+            st.rerun()
 
-        if st.session_state.confirmar_exclusao:
-            st.warning(
-                "Tem certeza? Essa ação não pode ser desfeita."
-            )
+    st.divider()
 
-            if st.button("Confirmar exclusão"):
-                arquivo = st.session_state.nome_arquivo
-
-                if os.path.exists(arquivo):
-                    os.remove(arquivo)
-
-                try:
-                    if COOKIE_NOME in cookies:
-                        del cookies[COOKIE_NOME]
-                    cookies.save()
-                except Exception:
-                    pass
-
-                limpar_sessao()
-                st.rerun()
-
-            if st.button("Cancelar"):
-                st.session_state.confirmar_exclusao = False
-                st.rerun()
-
-    # Exibe o histórico.
-    for mensagem in st.session_state.historico:
-        if mensagem["role"] == "user":
-            with st.chat_message("user"):
-                st.write(mensagem["content"])
-
-        elif mensagem["role"] == "assistant":
-            with st.chat_message("assistant", avatar="🤖"):
-                st.write(mensagem["content"])
-
-    pergunta = st.chat_input("Diga algo para o Gepeto...")
-
-    if pergunta:
-        if client is None:
-            st.error(
-                "API Key não configurada. Acesse o Streamlit Cloud, "
-                "abra Settings > Secrets e configure GROQ_API_KEY."
-            )
-
+    if st.button("🗑️ Excluir conversa atual", use_container_width=True):
+        if len(dados["chats"]) == 1:
+            dados["chats"] = [novo_chat()]
         else:
-            st.session_state.historico.append({
-                "role": "user",
-                "content": pergunta
-            })
+            dados["chats"] = [
+                c for c in dados["chats"]
+                if c["id"] != st.session_state.chat_id
+            ]
 
-            with st.chat_message("user"):
-                st.write(pergunta)
+        st.session_state.chat_id = dados["chats"][0]["id"]
+        salvar_conversas(dados)
+        st.rerun()
 
-            try:
-                with st.chat_message("assistant", avatar="🤖"):
-                    with st.spinner("Gepetto está pensando..."):
-                        resposta = client.chat.completions.create(
-                            model="openai/gpt-oss-20b",
-                            messages=st.session_state.historico,
-                            temperature=0.7,
-                            max_tokens=2048
-                        )
+    if st.button("🚪 Sair da conta", use_container_width=True):
+        sair()
+        st.rerun()
 
-                        texto = (
-                            resposta.choices[0].message.content
-                            or "Não consegui gerar uma resposta."
-                        )
+chat = chat_atual(dados)
+historico = chat["historico"]
 
-                        st.write(texto)
+st.subheader(chat.get("titulo", "Novo chat"))
 
-                st.session_state.historico.append({
-                    "role": "assistant",
-                    "content": texto
-                })
+for mensagem in historico:
+    if mensagem["role"] == "system":
+        continue
+    with st.chat_message(
+        mensagem["role"],
+        avatar="🤖" if mensagem["role"] == "assistant" else None
+    ):
+        st.markdown(mensagem["content"])
 
-                dados_atuais = carregar_dados_usuario(
-                    st.session_state.nome_arquivo
-                ) or {}
+pergunta = st.chat_input("Mande uma mensagem para o Gepetto...")
 
-                salvar_dados_usuario(
-                    st.session_state.nome_arquivo,
-                    dados_atuais.get("senha", ""),
-                    st.session_state.historico,
-                    token_hash=dados_atuais.get("token_hash", "")
+if pergunta:
+    if client is None:
+        st.error(
+            "Configure GROQ_API_KEY em Streamlit Cloud > Settings > Secrets."
+        )
+        st.stop()
+
+    historico.append({"role": "user", "content": pergunta})
+
+    if chat.get("titulo") == "Novo chat":
+        chat["titulo"] = pergunta.strip().replace("\n", " ")[:35]
+    salvar_conversas(dados)
+
+    with st.chat_message("user"):
+        st.markdown(pergunta)
+
+    try:
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("Gepetto está pensando..."):
+                resposta = client.chat.completions.create(
+                    model="openai/gpt-oss-20b",
+                    messages=historico,
+                    temperature=0.7,
+                    max_tokens=2048
                 )
+                texto = (
+                    resposta.choices[0].message.content
+                    or "Não consegui gerar uma resposta."
+                )
+                st.markdown(texto)
 
-            except Exception as erro:
-                if (
-                    st.session_state.historico
-                    and st.session_state.historico[-1]["role"] == "user"
-                    and st.session_state.historico[-1]["content"] == pergunta
-                ):
-                    st.session_state.historico.pop()
+        historico.append({"role": "assistant", "content": texto})
+        salvar_conversas(dados)
 
-                st.error(f"Erro ao falar com o Gepetto: {erro}")
+    except Exception as erro:
+        # Mantém a pergunta no histórico para não perder o que foi enviado.
+        salvar_conversas(dados)
+        st.error(f"Erro ao falar com o Gepetto: {erro}")
