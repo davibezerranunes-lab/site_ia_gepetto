@@ -250,9 +250,8 @@ if "autenticado" not in st.session_state:
     st.session_state.login_verificado = False
 
 # Tenta restaurar a sessão após uma atualização.
-if not st.session_state.login_verificado:
+if not st.session_state.autenticado:
     restaurar_login()
-    st.session_state.login_verificado = True
 
 # ==================================================
 # CABEÇALHO
