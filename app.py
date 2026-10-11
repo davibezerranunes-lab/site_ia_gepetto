@@ -44,6 +44,7 @@ try:
     )
 
     if not cookies.ready():
+        st.info("Carregando sua sessão...")
         st.stop()
 
 except Exception:
@@ -52,7 +53,6 @@ except Exception:
         "Confira COOKIES_PASSWORD nos Secrets."
     )
     st.stop()
-
 
 # =========================
 # GROQ
