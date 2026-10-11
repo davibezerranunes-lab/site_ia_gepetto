@@ -868,10 +868,17 @@ if dados["chat_atual"]:
                     "7. Continue aceitando pedidos legítimos de programação, explicação e análise."
                 )
 
+                # Lê o próprio arquivo app.py automaticamente para a IA saber o código dela
+                try:
+                    codigo_fonte_atual = Path(__file__).read_text(encoding="utf-8")
+                except Exception:
+                    codigo_fonte_atual = "Código indisponível no momento."
+
                 PROMPT_ADMIN = (
                     "Você é exclusivamente o Gepetto, uma inteligência artificial criada por Davi Bezerra Nunes "
                     "(um garoto de 10 anos que construiu e apelidou esta IA de Gepetto) para a Família Bezerra, "
-                    "operando em modo de controle de administrador.\n"
+                    "operando em modo de controle de administrador.\n\n"
+                    f"Abaixo está o código-fonte completo da sua aplicação:\n{codigo_fonte_atual}\n\n"
                     "O código secreto '2045' foi validado com sucesso.\n\n"
                     "REGRA ABSOLUTA DE IDENTIDADE:\n"
                     "- Você NÃO é o ChatGPT e NÃO foi criado pela OpenAI.\n"
