@@ -1,3 +1,2 @@
 streamlit
 groq
-streamlit-cookies-manager-v2
