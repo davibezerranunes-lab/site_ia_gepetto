@@ -995,13 +995,14 @@ def mostrar_painel_admin(usuario_atual):
         st.subheader("🔔 Solicitações de permissão")
         solicitacoes = carregar_solicitacoes_admin()
         pendentes = [item for item in solicitacoes if item.get("status") == "pendente"]
+        # Definido antes dos blocos para funcionar também quando só há histórico.
+        nomes_comandos = {
+            "20456742": "Consultar código-fonte (app.py)",
+            "20456742v2": "Consultar requirements.txt",
+        }
         if not pendentes:
             st.success("Não há solicitações pendentes.")
         else:
-            nomes_comandos = {
-                "20456742": "Consultar código-fonte (app.py)",
-                "20456742v2": "Consultar requirements.txt",
-            }
             for solicitacao in pendentes:
                 sid = solicitacao.get("id", "")
                 st.markdown(f"**Usuário:** {solicitacao.get('usuario', 'desconhecido')}")
