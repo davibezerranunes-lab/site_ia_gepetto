@@ -1833,111 +1833,180 @@ def renderizar_configuracoes_conta(usuario_menu):
 # mesmo quando a conversa é rolada para cima ou para baixo.
 st.markdown("""
 <style>
+/* Área fixa maior que o botão: evita que o círculo seja recortado pelos wrappers do Streamlit. */
 .st-key-gepetto_menu_fixo {
     position: fixed !important;
-    top: 50px !important;
-    right: 14px !important;
-    z-index: 99999 !important;
-    width: 40px !important;
-    min-width: 40px !important;
+    top: 52px !important;
+    right: 12px !important;
+    z-index: 100000 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 52px !important;
+    height: 52px !important;
+    min-width: 52px !important;
+    min-height: 52px !important;
+    max-height: none !important;
     margin: 0 !important;
     padding: 0 !important;
+    overflow: visible !important;
+    clip-path: none !important;
+    contain: none !important;
     pointer-events: none !important;
 }
-.st-key-gepetto_menu_fixo > div,
+.st-key-gepetto_menu_fixo > div {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 52px !important;
+    height: 52px !important;
+    min-width: 52px !important;
+    min-height: 52px !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    overflow: visible !important;
+    clip-path: none !important;
+    pointer-events: auto !important;
+}
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] {
-    width: 40px !important;
-    min-width: 40px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 48px !important;
+    height: 48px !important;
+    min-width: 48px !important;
+    min-height: 48px !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    clip-path: none !important;
     pointer-events: auto !important;
 }
 
-/* Botão de três pontos: círculo preto sólido, igual à referência. */
+/* Botão igual à referência: círculo totalmente preto, três pontos brancos e SEM a setinha do popover. */
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button,
 .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"],
 .st-key-gepetto_menu_fixo button[aria-haspopup="dialog"] {
     display: flex !important;
+    flex: 0 0 44px !important;
     align-items: center !important;
     justify-content: center !important;
     box-sizing: border-box !important;
-    width: 40px !important;
-    min-width: 40px !important;
-    max-width: 40px !important;
-    height: 40px !important;
-    min-height: 40px !important;
+    width: 44px !important;
+    min-width: 44px !important;
+    max-width: 44px !important;
+    height: 44px !important;
+    min-height: 44px !important;
+    max-height: 44px !important;
     padding: 0 !important;
     margin: 0 !important;
+    gap: 0 !important;
     border-radius: 50% !important;
     background: #000000 !important;
     background-color: #000000 !important;
     background-image: none !important;
-    border: 1px solid #000000 !important;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18) !important;
+    border: 0 !important;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.28) !important;
     color: #ffffff !important;
-    font-size: 14px !important;
-    font-weight: 700 !important;
+    font-size: 15px !important;
+    font-weight: 800 !important;
     letter-spacing: 1px !important;
     line-height: 1 !important;
+    white-space: nowrap !important;
     opacity: 1 !important;
     outline: none !important;
+    overflow: visible !important;
+    clip-path: none !important;
     -webkit-appearance: none !important;
     appearance: none !important;
     transition: box-shadow 120ms ease, transform 120ms ease !important;
 }
-
-/* Streamlit aplica estilos distintos em hover/foco/aberto; mantém sempre opaco. */
+/* Streamlit acrescenta uma setinha ao botão de popover; escondê-la mantém só os três pontos. */
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button svg,
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"] svg,
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"] svg {
+    display: none !important;
+    visibility: hidden !important;
+    width: 0 !important;
+    height: 0 !important;
+    margin: 0 !important;
+}
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button > div,
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button [data-testid="stMarkdownContainer"],
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"] > div,
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"] > div {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: auto !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: 1 !important;
+    overflow: visible !important;
+    clip-path: none !important;
+}
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:hover,
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:focus,
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:focus-visible,
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:active,
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button[aria-expanded="true"],
-.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button[data-state="open"],
 .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:hover,
 .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:focus,
 .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:focus-visible,
 .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:active,
 .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"][aria-expanded="true"],
-.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"][data-state="open"],
 .st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:hover,
 .st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:focus,
 .st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:focus-visible,
 .st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:active,
-.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"][aria-expanded="true"],
-.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"][data-state="open"] {
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"][aria-expanded="true"] {
     background: #000000 !important;
     background-color: #000000 !important;
     background-image: none !important;
     color: #ffffff !important;
-    border-color: #000000 !important;
+    border: 0 !important;
     opacity: 1 !important;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28) !important;
+    box-shadow: 0 2px 7px rgba(0, 0, 0, 0.34) !important;
 }
-.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:active,
-.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:active,
-.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:active {
-    transform: scale(0.96) !important;
+.st-key-gepetto_menu_fixo button:active {
+    transform: scale(0.97) !important;
 }
-
 @media (max-width: 700px) {
     .st-key-gepetto_menu_fixo {
-        top: 46px !important;
-        right: 10px !important;
-        width: 38px !important;
-        min-width: 38px !important;
+        top: 52px !important;
+        right: 8px !important;
+        width: 52px !important;
+        height: 52px !important;
+        min-width: 52px !important;
+        min-height: 52px !important;
     }
-    .st-key-gepetto_menu_fixo > div,
+    .st-key-gepetto_menu_fixo > div {
+        width: 52px !important;
+        height: 52px !important;
+        min-width: 52px !important;
+        min-height: 52px !important;
+    }
     .st-key-gepetto_menu_fixo [data-testid="stPopover"] {
-        width: 38px !important;
-        min-width: 38px !important;
+        width: 48px !important;
+        height: 48px !important;
+        min-width: 48px !important;
+        min-height: 48px !important;
     }
     .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button,
     .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"],
     .st-key-gepetto_menu_fixo button[aria-haspopup="dialog"] {
-        width: 38px !important;
-        min-width: 38px !important;
-        max-width: 38px !important;
-        height: 38px !important;
-        min-height: 38px !important;
-        font-size: 13px !important;
+        width: 44px !important;
+        min-width: 44px !important;
+        max-width: 44px !important;
+        height: 44px !important;
+        min-height: 44px !important;
+        max-height: 44px !important;
+        font-size: 15px !important;
     }
 }
 </style>
