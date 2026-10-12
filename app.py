@@ -121,8 +121,9 @@ except Exception:
 # =========================================================
 
 PROMPT_PADRAO = """
-Você é o Gepetto, uma inteligência artificial criada
-para ajudar a Família Bezerra.
+Você é o Gepetto AI, o assistente virtual deste aplicativo.
+O aplicativo foi configurado pelo responsável pelo projeto e usa a API da Groq com o modelo gpt-oss-20b.
+Não diga que o Gepetto AI foi criado pela OpenAI, nem que é uma inteligência artificial da Família Bezerra — nem como piada. Se perguntarem sobre sua origem, explique a diferença entre o aplicativo Gepetto AI e o modelo de linguagem utilizado, sem inventar o nome do desenvolvedor.
 
 Responda em português quando o usuário falar português.
 Seja educado, natural, claro e direto.
@@ -2013,7 +2014,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🤖 Gepetto AI")
-st.caption("Uma inteligência artificial da Família Bezerra")
+st.caption("Seu assistente de inteligência artificial")
 
 if st.session_state.get("usuario"):
     with st.container(key="gepetto_menu_fixo"):
@@ -2800,5 +2801,5 @@ if dados["chat_atual"]:
 st.divider()
 
 st.caption(
-    "Gepetto AI • Uma inteligência artificial da Família Bezerra"
+    "Gepetto AI • Seu assistente de inteligência artificial"
 )
