@@ -33,6 +33,14 @@ PASTA_DADOS.mkdir(parents=True, exist_ok=True)
 PASTA_UPLOADS = PASTA_DADOS / "uploads"
 PASTA_UPLOADS.mkdir(parents=True, exist_ok=True)
 
+# Restringe permissões em sistemas POSIX; no Windows/hosts gerenciados,
+# as permissões efetivas continuam dependendo do sistema operacional.
+try:
+    PASTA_DADOS.chmod(0o700)
+    PASTA_UPLOADS.chmod(0o700)
+except OSError:
+    pass
+
 TAMANHO_MAXIMO_ARQUIVO_MB = 5
 TAMANHO_MAXIMO_ARQUIVO = TAMANHO_MAXIMO_ARQUIVO_MB * 1024 * 1024
 MAX_FOTOS_POR_DIA = 15
@@ -511,7 +519,15 @@ def salvar_dados(usuario, dados):
                 indent=2,
             )
 
+        try:
+            temporario.chmod(0o600)
+        except OSError:
+            pass
         temporario.replace(arquivo)
+        try:
+            arquivo.chmod(0o600)
+        except OSError:
+            pass
         return True
 
     except OSError:
@@ -1328,7 +1344,15 @@ def salvar_solicitacoes_admin(itens):
     try:
         with temporario.open("w", encoding="utf-8") as f:
             json.dump(itens, f, ensure_ascii=False, indent=2)
+        try:
+            temporario.chmod(0o600)
+        except OSError:
+            pass
         temporario.replace(ARQUIVO_SOLICITACOES)
+        try:
+            ARQUIVO_SOLICITACOES.chmod(0o600)
+        except OSError:
+            pass
         return True
     except OSError:
         try:
@@ -2609,25 +2633,13 @@ if entrada_chat:
         st.rerun()
 
     if texto in ("20456742", "20456742v2"):
-        if eh_admin(usuario):
-            # A conta ADM autenticada pode acessar os arquivos diretamente, sem e-mail.
-            if texto == "20456742":
-                mostrar_codigo_fonte()
-            else:
-                mostrar_requirements()
+        # Arquivos internos nunca são liberados por aprovação de outra conta.
+        # Mesmo o administrador precisa concluir a verificação temporária por e-mail.
+        if not eh_admin(usuario):
+            st.error("Acesso negado: esse recurso é exclusivo da conta administrativa.")
             st.stop()
 
-        if permissao_aprovada(usuario, texto):
-            if texto == "20456742":
-                mostrar_codigo_fonte()
-            else:
-                mostrar_requirements()
-            st.stop()
-
-        if criar_solicitacao_admin(usuario, texto):
-            st.info("🔔 Sua solicitação foi enviada ao Painel de ADM. Aguarde a aprovação e envie o mesmo comando novamente.")
-        else:
-            st.error("Não foi possível registrar a solicitação. Tente novamente.")
+        iniciar_verificacao(texto, usuario)
         st.stop()
 
     if texto == "paineladm":
