@@ -1836,36 +1836,70 @@ st.markdown("""
 .st-key-gepetto_menu_fixo {
     position: fixed !important;
     top: 50px !important;
-    right: 34px !important;
+    right: 14px !important;
     z-index: 99999 !important;
-    width: max-content !important;
-    min-width: 0 !important;
+    width: 40px !important;
+    min-width: 40px !important;
     margin: 0 !important;
     padding: 0 !important;
+    pointer-events: none !important;
 }
 .st-key-gepetto_menu_fixo > div,
 .st-key-gepetto_menu_fixo [data-testid="stPopover"] {
-    width: max-content !important;
-    min-width: 0 !important;
+    width: 40px !important;
+    min-width: 40px !important;
+    pointer-events: auto !important;
 }
-.st-key-gepetto_menu_fixo button {
-    min-width: 44px !important;
-    min-height: 44px !important;
-    padding: 0 8px !important;
-    background: transparent !important;
-    border: 1px solid transparent !important;
-    box-shadow: none !important;
-    color: rgba(255, 255, 255, 0.88) !important;
+/* Estiliza apenas o botão que abre o popover, não os botões dentro do menu. */
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box !important;
+    width: 40px !important;
+    min-width: 40px !important;
+    max-width: 40px !important;
+    height: 40px !important;
+    min-height: 40px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    background: rgba(0, 0, 0, 0.90) !important;
+    border: 1px solid rgba(255, 255, 255, 0.24) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18) !important;
+    color: #ffffff !important;
     font-size: 22px !important;
+    line-height: 1 !important;
+    opacity: 0.94 !important;
+    transition: background 120ms ease, opacity 120ms ease, transform 120ms ease !important;
 }
-.st-key-gepetto_menu_fixo button:hover {
-    background: rgba(255, 255, 255, 0.08) !important;
-    border-color: rgba(255, 255, 255, 0.12) !important;
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:hover,
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:focus-visible {
+    background: rgba(0, 0, 0, 0.98) !important;
+    border-color: rgba(255, 255, 255, 0.48) !important;
+    opacity: 1 !important;
+}
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:active {
+    transform: scale(0.96) !important;
 }
 @media (max-width: 700px) {
     .st-key-gepetto_menu_fixo {
-        top: 44px !important;
-        right: 12px !important;
+        top: 46px !important;
+        right: 10px !important;
+        width: 38px !important;
+        min-width: 38px !important;
+    }
+    .st-key-gepetto_menu_fixo > div,
+    .st-key-gepetto_menu_fixo [data-testid="stPopover"] {
+        width: 38px !important;
+        min-width: 38px !important;
+    }
+    .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button {
+        width: 38px !important;
+        min-width: 38px !important;
+        max-width: 38px !important;
+        height: 38px !important;
+        min-height: 38px !important;
+        font-size: 21px !important;
     }
 }
 </style>
