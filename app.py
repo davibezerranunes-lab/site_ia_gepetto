@@ -8,6 +8,8 @@ import smtplib
 import time
 import mimetypes
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from email.message import EmailMessage
 
@@ -33,8 +35,8 @@ PASTA_UPLOADS.mkdir(parents=True, exist_ok=True)
 
 TAMANHO_MAXIMO_ARQUIVO_MB = 5
 TAMANHO_MAXIMO_ARQUIVO = TAMANHO_MAXIMO_ARQUIVO_MB * 1024 * 1024
-MAX_FOTOS_POR_ENVIO = 15
-MAX_ARQUIVOS_POR_ENVIO = 5
+MAX_FOTOS_POR_DIA = 15
+MAX_ARQUIVOS_POR_DIA = 5
 EXTENSOES_IMAGEM = {"png", "jpg", "jpeg", "webp"}
 EXTENSOES_TEXTO = {"txt", "md", "csv", "json", "py", "html", "css", "js", "xml", "yaml", "yml", "toml", "ini", "log"}
 EXTENSOES_DOCUMENTO = {"pdf", "docx", "xlsx"}
@@ -173,7 +175,7 @@ def normalizar_mensagem(mensagem):
     anexos_validos = []
     anexos = mensagem.get("attachments", [])
     if isinstance(anexos, list):
-        for anexo in anexos[:MAX_FOTOS_POR_ENVIO + MAX_ARQUIVOS_POR_ENVIO]:
+        for anexo in anexos[:MAX_FOTOS_POR_DIA + MAX_ARQUIVOS_POR_DIA]:
             if not isinstance(anexo, dict):
                 continue
             nome_salvo = str(anexo.get("saved_name", ""))
@@ -257,6 +259,57 @@ def extrair_texto_arquivo(caminho, extensao):
     except Exception:
         return "[O arquivo foi anexado, mas não consegui extrair seu texto automaticamente.]"
     return ""
+
+
+def data_local_upload():
+    """Data do dia no fuso brasileiro, para reiniciar as cotas à meia-noite."""
+    try:
+        return datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat()
+    except Exception:
+        return datetime.now().date().isoformat()
+
+
+def caminho_cota_upload(usuario):
+    identificador = hashlib.sha256(
+        str(usuario).strip().casefold().encode("utf-8")
+    ).hexdigest()
+    pasta_cotas = PASTA_DADOS / "cotas_upload"
+    pasta_cotas.mkdir(parents=True, exist_ok=True)
+    return pasta_cotas / f"{identificador}.json"
+
+
+def carregar_cota_upload(usuario):
+    """Retorna o uso diário; a cota reinicia automaticamente em um novo dia."""
+    hoje = data_local_upload()
+    caminho = caminho_cota_upload(usuario)
+    try:
+        if caminho.exists():
+            bruto = json.loads(caminho.read_text(encoding="utf-8"))
+            if isinstance(bruto, dict) and bruto.get("data") == hoje:
+                return {
+                    "data": hoje,
+                    "fotos": max(0, int(bruto.get("fotos", 0))),
+                    "arquivos": max(0, int(bruto.get("arquivos", 0))),
+                }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return {"data": hoje, "fotos": 0, "arquivos": 0}
+
+
+def salvar_cota_upload(usuario, cota):
+    caminho = caminho_cota_upload(usuario)
+    temporario = caminho.with_suffix(".tmp")
+    try:
+        temporario.write_text(json.dumps(cota), encoding="utf-8")
+        temporario.replace(caminho)
+        return True
+    except OSError:
+        try:
+            if temporario.exists():
+                temporario.unlink()
+        except OSError:
+            pass
+        return False
 
 
 def salvar_anexo(usuario, arquivo_enviado):
@@ -2323,7 +2376,7 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-st.caption("Anexe até 15 fotos e 5 arquivos por mensagem (máximo de 5 MB por arquivo). O Gepetto pode analisar os anexos, mas não cria imagens novas.")
+st.caption("Limite diário por conta: 15 fotos e 5 arquivos por dia, com até 5 MB por arquivo. As cotas reiniciam à meia-noite (horário de Brasília).")
 
 entrada_chat = st.chat_input(
     "Converse com o Gepetto...",
@@ -2344,11 +2397,20 @@ if entrada_chat:
         if Path(str(arquivo.name)).suffix.lower().lstrip(".") in EXTENSOES_IMAGEM
     ]
     documentos_enviados = [arquivo for arquivo in arquivos_enviados if arquivo not in fotos_enviadas]
-    if len(fotos_enviadas) > MAX_FOTOS_POR_ENVIO:
-        st.error(f"Você pode enviar até {MAX_FOTOS_POR_ENVIO} fotos por mensagem.")
+    cota_upload = carregar_cota_upload(usuario)
+    fotos_restantes = max(0, MAX_FOTOS_POR_DIA - cota_upload["fotos"])
+    arquivos_restantes = max(0, MAX_ARQUIVOS_POR_DIA - cota_upload["arquivos"])
+    if len(fotos_enviadas) > fotos_restantes:
+        st.error(
+            f"Você ainda pode enviar {fotos_restantes} foto(s) hoje. "
+            f"O limite é {MAX_FOTOS_POR_DIA} fotos por dia; a cota reinicia amanhã à meia-noite (horário de Brasília)."
+        )
         st.stop()
-    if len(documentos_enviados) > MAX_ARQUIVOS_POR_ENVIO:
-        st.error(f"Você pode enviar até {MAX_ARQUIVOS_POR_ENVIO} arquivos por mensagem, além das fotos (máximo de 5 MB por arquivo).")
+    if len(documentos_enviados) > arquivos_restantes:
+        st.error(
+            f"Você ainda pode enviar {arquivos_restantes} arquivo(s) hoje. "
+            f"O limite é {MAX_ARQUIVOS_POR_DIA} arquivos por dia; a cota reinicia amanhã à meia-noite (horário de Brasília)."
+        )
         st.stop()
     arquivos_grandes = [arquivo.name for arquivo in arquivos_enviados if getattr(arquivo, "size", 0) > TAMANHO_MAXIMO_ARQUIVO]
     if arquivos_grandes:
@@ -2369,6 +2431,13 @@ if entrada_chat:
     except OSError:
         st.error("Não consegui salvar os anexos. Tente novamente.")
         st.stop()
+
+    if arquivos_enviados:
+        cota_upload["fotos"] += len(fotos_enviadas)
+        cota_upload["arquivos"] += len(documentos_enviados)
+        if not salvar_cota_upload(usuario, cota_upload):
+            st.error("Não consegui registrar o limite diário de anexos. Tente novamente mais tarde.")
+            st.stop()
 
     # -----------------------------------------------------
     # SOLICITAÇÕES DE PERMISSÃO PELO PAINEL DE ADM
