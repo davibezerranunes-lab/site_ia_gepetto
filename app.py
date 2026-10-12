@@ -51,11 +51,29 @@ EMAIL_ADMIN = st.secrets.get(
     "davibezerranunes@gmail.com",
 )
 
-# Configure ADMIN_USERNAME nos Secrets com o nome exato da conta do ADM.
-# Se não estiver configurado, o sistema usa a parte anterior ao @ do OWNER_EMAIL.
-ADMIN_USERNAME = str(
-    st.secrets.get("ADMIN_USERNAME", EMAIL_ADMIN.split("@")[0])
-).strip().casefold()
+# Para permitir vários administradores, configure ADMIN_USERNAMES nos Secrets.
+# Aceita uma lista TOML ou nomes separados por vírgula.
+# ADMIN_USERNAME continua aceito para manter compatibilidade com a configuração antiga.
+_admin_raw = st.secrets.get(
+    "ADMIN_USERNAMES",
+    st.secrets.get("ADMIN_USERNAME", EMAIL_ADMIN.split("@")[0]),
+)
+if isinstance(_admin_raw, (list, tuple, set)):
+    _admin_items = list(_admin_raw)
+else:
+    _admin_items = str(_admin_raw or "").replace(";", ",").replace("\n", ",").split(",")
+_admin_names_normalized = [
+    str(item).strip().casefold()
+    for item in _admin_items
+    if str(item).strip()
+]
+ADMIN_USERNAMES = set(_admin_names_normalized)
+# Compatibilidade com pontos do código que possam usar o ADM principal.
+ADMIN_USERNAME = (
+    _admin_names_normalized[0]
+    if _admin_names_normalized
+    else EMAIL_ADMIN.split("@")[0].strip().casefold()
+)
 
 
 # =========================================================
@@ -455,8 +473,8 @@ def salvar_dados(usuario, dados):
 
 
 def eh_admin(usuario):
-    """Compara o usuário autenticado com o ADMIN_USERNAME configurado."""
-    return bool(usuario) and usuario.strip().casefold() == ADMIN_USERNAME
+    """Verifica se o usuário autenticado está na lista de administradores."""
+    return bool(usuario) and usuario.strip().casefold() in ADMIN_USERNAMES
 
 
 def listar_usuarios():
@@ -1806,8 +1824,20 @@ st.caption("Uma inteligência artificial da Família Bezerra")
 if st.session_state.get("usuario"):
     with st.container(key="gepetto_menu_fixo"):
         with st.popover("⋮", help="Configurações da conta"):
-            st.caption(f"Conta: {st.session_state.get('usuario', '')}")
-            renderizar_configuracoes_conta(st.session_state.get("usuario", ""))
+            usuario_menu_atual = st.session_state.get("usuario", "")
+            st.caption(f"Conta: {usuario_menu_atual}")
+            if eh_admin(usuario_menu_atual):
+                if st.button(
+                    "🛡️ Abrir Painel de ADM",
+                    key="menu_abrir_painel_admin",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    st.session_state.painel_admin_autorizado = True
+                    st.session_state.confirmar_exclusao_admin = ""
+                    st.rerun()
+                st.divider()
+            renderizar_configuracoes_conta(usuario_menu_atual)
 
 
 # =========================================================
@@ -2092,21 +2122,6 @@ if not salvar_dados(usuario, dados):
 with st.sidebar:
     st.title("💬 Conversas")
     st.caption(f"Conta: {usuario}")
-
-    if eh_admin(usuario):
-        st.caption("🛡️ Conta administrativa")
-
-        if st.button(
-            "🛡️ Abrir Painel de ADM",
-            use_container_width=True,
-            type="primary",
-            key="botao_abrir_painel_admin",
-        ):
-            # O botão só é exibido para a conta ADMIN_USERNAME autenticada.
-            # A autorização é validada novamente ao renderizar o painel.
-            st.session_state.painel_admin_autorizado = True
-            st.session_state.confirmar_exclusao_admin = ""
-            st.rerun()
 
     if st.button("➕ Nova conversa", use_container_width=True):
         numero = 1
