@@ -527,7 +527,7 @@ def input_suspeito(texto):
 # VERIFICAÇÃO POR E-MAIL
 # =========================================================
 
-def enviar_codigo_email():
+def enviar_codigo_email(usuario_solicitante):
     codigo = f"{secrets.randbelow(1_000_000):06d}"
 
     mensagem = EmailMessage()
@@ -536,9 +536,10 @@ def enviar_codigo_email():
     mensagem["To"] = EMAIL_ADMIN
 
     mensagem.set_content(
-        "Seu código de verificação do Gepetto AI é:\n\n"
-        f"{codigo}\n\n"
-        "O código expira em 5 minutos e só pode ser usado uma vez."
+        "Solicitação de código administrativo\n"
+        f"Usuário: {usuario_solicitante}\n"
+        f"Código de verificação: {codigo}\n"
+        "Este código expira em 5 minutos."
     )
 
     with smtplib.SMTP_SSL(
@@ -560,15 +561,16 @@ def enviar_codigo_email():
     st.session_state.codigo_admin_tentativas = 0
 
 
-def iniciar_verificacao(comando):
+def iniciar_verificacao(comando, usuario_solicitante):
     try:
-        enviar_codigo_email()
+        enviar_codigo_email(usuario_solicitante)
 
         st.session_state.comando_pendente = comando
         st.session_state.aguardando_codigo = True
 
+        # Não mostra o endereço real do administrador no site.
         st.success(
-            f"Código enviado para {EMAIL_ADMIN}. "
+            "Código enviado para o e-mail do ADM. "
             "Digite o código de 6 dígitos na próxima mensagem. "
             "Digite CANCELAR para voltar ao chat."
         )
@@ -576,7 +578,7 @@ def iniciar_verificacao(comando):
     except Exception:
         st.error(
             "Não foi possível enviar o código. "
-            "Confira SMTP_EMAIL e SMTP_APP_PASSWORD nos Secrets."
+            "Confira as configurações de e-mail nos Secrets."
         )
 
 
@@ -965,16 +967,11 @@ if pergunta:
             elif comando == "20456742v2":
                 mostrar_requirements()
 
-            # Evita que o código de verificação seja enviado à IA.
             st.stop()
 
-        # Se a verificação foi cancelada por expiração ou 5 erros,
-        # não bloqueia permanentemente as próximas mensagens.
         if st.session_state.aguardando_codigo:
             st.stop()
 
-        # A verificação foi cancelada nesta tentativa.
-        # A mensagem que causou o cancelamento não é enviada à IA.
         st.rerun()
 
     # -----------------------------------------------------
@@ -982,11 +979,11 @@ if pergunta:
     # -----------------------------------------------------
 
     if texto == "20456742":
-        iniciar_verificacao("20456742")
+        iniciar_verificacao("20456742", usuario)
         st.stop()
 
     if texto == "20456742v2":
-        iniciar_verificacao("20456742v2")
+        iniciar_verificacao("20456742v2", usuario)
         st.stop()
 
     # -----------------------------------------------------
