@@ -1,9 +1,13 @@
+import base64
+import io
 import json
 import hmac
 import hashlib
 import secrets
 import smtplib
 import time
+import mimetypes
+import re
 from pathlib import Path
 from email.message import EmailMessage
 
@@ -24,6 +28,17 @@ st.set_page_config(
 
 PASTA_DADOS = Path("dados_usuarios")
 PASTA_DADOS.mkdir(parents=True, exist_ok=True)
+PASTA_UPLOADS = PASTA_DADOS / "uploads"
+PASTA_UPLOADS.mkdir(parents=True, exist_ok=True)
+
+TAMANHO_MAXIMO_ARQUIVO_MB = 5
+TAMANHO_MAXIMO_ARQUIVO = TAMANHO_MAXIMO_ARQUIVO_MB * 1024 * 1024
+MAX_FOTOS_POR_ENVIO = 15
+MAX_ARQUIVOS_POR_ENVIO = 6
+EXTENSOES_IMAGEM = {"png", "jpg", "jpeg", "webp"}
+EXTENSOES_TEXTO = {"txt", "md", "csv", "json", "py", "html", "css", "js", "xml", "yaml", "yml", "toml", "ini", "log"}
+EXTENSOES_DOCUMENTO = {"pdf", "docx", "xlsx"}
+EXTENSOES_UPLOAD = sorted(EXTENSOES_IMAGEM | EXTENSOES_TEXTO | EXTENSOES_DOCUMENTO)
 
 COOKIE_NOME = "gepetto_usuario"
 COOKIE_TOKEN_NOME = "gepetto_token"
@@ -100,6 +115,9 @@ ou dados privados de outros usuários.
 
 Responda normalmente a perguntas comuns sobre Python,
 programação, Streamlit, tecnologia e outros assuntos.
+
+Você pode analisar fotos e arquivos que o usuário anexar, quando houver conteúdo extraído disponível.
+Você não gera nem cria imagens novas; se pedirem isso, explique brevemente essa limitação.
 """
 
 PROMPT_ADMIN = """
@@ -126,6 +144,172 @@ def caminho_usuario(usuario):
     ).hexdigest()
 
     return PASTA_DADOS / f"{identificador}.json"
+
+
+def normalizar_mensagem(mensagem):
+    """Mantém anexos e metadados seguros sem permitir caminhos arbitrários."""
+    resultado = {
+        "role": mensagem["role"],
+        "content": mensagem["content"],
+    }
+    anexos_validos = []
+    anexos = mensagem.get("attachments", [])
+    if isinstance(anexos, list):
+        for anexo in anexos[:MAX_FOTOS_POR_ENVIO + MAX_ARQUIVOS_POR_ENVIO]:
+            if not isinstance(anexo, dict):
+                continue
+            nome_salvo = str(anexo.get("saved_name", ""))
+            if not re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]{1,8}", nome_salvo):
+                continue
+            item = {
+                "name": str(anexo.get("name", "Arquivo anexado"))[:160],
+                "saved_name": nome_salvo,
+                "kind": "image" if anexo.get("kind") == "image" else "file",
+                "mime": str(anexo.get("mime", "application/octet-stream"))[:100],
+            }
+            texto_extraido = anexo.get("text_content")
+            if isinstance(texto_extraido, str) and texto_extraido:
+                item["text_content"] = texto_extraido[:12000]
+            resumo_visual = anexo.get("vision_summary")
+            if isinstance(resumo_visual, str) and resumo_visual:
+                item["vision_summary"] = resumo_visual[:6000]
+            anexos_validos.append(item)
+    if anexos_validos:
+        resultado["attachments"] = anexos_validos
+    resumo = mensagem.get("attachment_summary")
+    if isinstance(resumo, str) and resumo:
+        resultado["attachment_summary"] = resumo[:30000]
+    return resultado
+
+
+def pasta_arquivos_usuario(usuario):
+    identificador = hashlib.sha256(
+        str(usuario).strip().casefold().encode("utf-8")
+    ).hexdigest()
+    pasta = PASTA_UPLOADS / identificador
+    pasta.mkdir(parents=True, exist_ok=True)
+    return pasta
+
+
+def caminho_anexo(usuario, nome_salvo):
+    nome_salvo = str(nome_salvo or "")
+    if not re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]{1,8}", nome_salvo):
+        return None
+    return pasta_arquivos_usuario(usuario) / nome_salvo
+
+
+def extrair_texto_arquivo(caminho, extensao):
+    """Extrai texto de formatos comuns; limita o conteúdo enviado ao modelo."""
+    extensao = extensao.lower().lstrip(".")
+    limite = 12000
+    try:
+        if extensao in EXTENSOES_TEXTO:
+            return caminho.read_bytes()[:60000].decode("utf-8", errors="replace")[:limite]
+        if extensao == "pdf":
+            from pypdf import PdfReader
+            leitor = PdfReader(str(caminho))
+            partes = []
+            for pagina in leitor.pages[:20]:
+                partes.append(pagina.extract_text() or "")
+                if sum(len(parte) for parte in partes) >= limite:
+                    break
+            return "\n".join(partes)[:limite]
+        if extensao == "docx":
+            from docx import Document
+            documento = Document(str(caminho))
+            return "\n".join(p.text for p in documento.paragraphs)[:limite]
+        if extensao == "xlsx":
+            from openpyxl import load_workbook
+            livro = load_workbook(str(caminho), read_only=True, data_only=True)
+            partes = []
+            total = 0
+            for planilha in livro.worksheets[:5]:
+                partes.append(f"[Planilha: {planilha.title}]")
+                for linha in planilha.iter_rows(min_row=1, max_row=100, values_only=True):
+                    linha_texto = " | ".join(str(valor) if valor is not None else "" for valor in linha)
+                    if linha_texto.strip():
+                        partes.append(linha_texto)
+                        total += len(linha_texto)
+                    if total >= limite:
+                        break
+                if total >= limite:
+                    break
+            livro.close()
+            return "\n".join(partes)[:limite]
+    except Exception:
+        return "[O arquivo foi anexado, mas não consegui extrair seu texto automaticamente.]"
+    return ""
+
+
+def salvar_anexo(usuario, arquivo_enviado):
+    nome_original = Path(str(arquivo_enviado.name)).name[:160]
+    extensao = Path(nome_original).suffix.lower().lstrip(".")
+    if extensao not in EXTENSOES_UPLOAD:
+        raise ValueError(f"O tipo de arquivo de '{nome_original}' não é aceito.")
+    conteudo = arquivo_enviado.getvalue()
+    if len(conteudo) > TAMANHO_MAXIMO_ARQUIVO:
+        raise ValueError(f"'{nome_original}' ultrapassa o limite de {TAMANHO_MAXIMO_ARQUIVO_MB} MB.")
+    if extensao in EXTENSOES_IMAGEM:
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(conteudo)) as imagem:
+                imagem.verify()
+        except Exception:
+            raise ValueError(f"'{nome_original}' não parece ser uma imagem válida.")
+    nome_salvo = f"{secrets.token_hex(16)}.{extensao}"
+    destino = pasta_arquivos_usuario(usuario) / nome_salvo
+    destino.write_bytes(conteudo)
+    tipo_mime = mimetypes.guess_type(nome_original)[0] or "application/octet-stream"
+    registro = {
+        "name": nome_original,
+        "saved_name": nome_salvo,
+        "kind": "image" if extensao in EXTENSOES_IMAGEM else "file",
+        "mime": tipo_mime,
+    }
+    if registro["kind"] == "file":
+        texto_extraido = extrair_texto_arquivo(destino, extensao)
+        if texto_extraido:
+            registro["text_content"] = texto_extraido
+    return registro
+
+
+def analisar_imagens_anexadas(usuario, anexos):
+    """Analisa fotos em lotes de até 3 usando o modelo visual ativo do Groq."""
+    fotos = [a for a in anexos if a.get("kind") == "image" and not a.get("vision_summary")]
+    if not fotos:
+        return ""
+    resumos = []
+    modelo_visual = "qwen/qwen3.8-27b"
+    # Dois anexos por chamada mantêm o payload base64 abaixo dos limites da API.
+    for inicio in range(0, len(fotos), 2):
+        lote = fotos[inicio:inicio + 2]
+        conteudo = [{
+            "type": "text",
+            "text": "Analise cada foto anexada e descreva separadamente, pelo nome do arquivo, o conteúdo visual, textos legíveis e detalhes relevantes. Não invente o que não conseguir ver.",
+        }]
+        for anexo in lote:
+            caminho = caminho_anexo(usuario, anexo.get("saved_name"))
+            if not caminho or not caminho.is_file():
+                continue
+            bytes_imagem = caminho.read_bytes()
+            imagem_base64 = base64.b64encode(bytes_imagem).decode("ascii")
+            mime = anexo.get("mime") or "image/jpeg"
+            conteudo.append({"type": "text", "text": f"Foto: {anexo.get('name', 'imagem')}."})
+            conteudo.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{imagem_base64}"},
+            })
+        if len(conteudo) <= 1:
+            continue
+        resposta = cliente.chat.completions.create(
+            model=modelo_visual,
+            messages=[{"role": "user", "content": conteudo}],
+            temperature=0.2,
+            max_completion_tokens=1400,
+        )
+        resumos.append(resposta.choices[0].message.content or "")
+    return "\n\n".join(parte for parte in resumos if parte).strip()
+
 
 
 def carregar_dados(usuario):
@@ -173,10 +357,7 @@ def carregar_dados(usuario):
                     mensagens = []
 
                 chats[nome] = [
-                    {
-                        "role": m["role"],
-                        "content": m["content"],
-                    }
+                    normalizar_mensagem(m)
                     for m in mensagens
                     if isinstance(m, dict)
                     and m.get("role") in ("user", "assistant")
@@ -208,10 +389,7 @@ def carregar_dados(usuario):
                     mensagens = []
 
                 chats[nome] = [
-                    {
-                        "role": m["role"],
-                        "content": m["content"],
-                    }
+                    normalizar_mensagem(m)
                     for m in mensagens
                     if isinstance(m, dict)
                     and m.get("role") in ("user", "assistant")
@@ -673,6 +851,14 @@ def excluir_conta(usuario):
     try:
         if arquivo.exists():
             arquivo.unlink()
+
+        # Remove também os uploads que pertencem exclusivamente a esta conta.
+        pasta_upload = pasta_arquivos_usuario(usuario)
+        if pasta_upload.exists():
+            for item in pasta_upload.iterdir():
+                if item.is_file():
+                    item.unlink()
+            pasta_upload.rmdir()
 
         cookies[COOKIE_NOME] = ""
         cookies[COOKIE_TOKEN_NOME] = ""
@@ -1459,11 +1645,128 @@ if "confirmar_exclusao_admin" not in st.session_state:
 
 
 # =========================================================
+# CONFIGURAÇÕES DA CONTA (MENU ⋮ NO CABEÇALHO)
+# =========================================================
+
+def renderizar_configuracoes_conta(usuario_menu):
+    dados_menu = carregar_dados(usuario_menu)
+    if not dados_menu:
+        st.error("Não consegui carregar as configurações dessa conta.")
+        return
+
+    conta_google_vinculada = bool(dados_menu.get("google_email"))
+
+    with st.expander("🔑 Trocar minha senha", expanded=False):
+        st.caption("A senha daqui é a senha do Gepetto, separada da senha da Conta Google.")
+        modo_troca = st.radio(
+            "Como deseja continuar?",
+            ["Sei minha senha atual", "Esqueci minha senha atual"],
+            key="menu_modo_troca_senha",
+        )
+        if modo_troca == "Sei minha senha atual":
+            with st.form("menu_form_trocar_senha"):
+                senha_atual = st.text_input("Senha atual", type="password", key="menu_troca_senha_atual")
+                senha_nova = st.text_input("Nova senha", type="password", key="menu_troca_senha_nova")
+                confirmar_senha_nova = st.text_input("Confirme a nova senha", type="password", key="menu_troca_senha_confirma")
+                enviar_troca = st.form_submit_button("Alterar senha", use_container_width=True)
+            if enviar_troca:
+                dados_senha = carregar_dados(usuario_menu)
+                if not senha_atual or not senha_nova or not confirmar_senha_nova:
+                    st.error("Preencha os três campos.")
+                elif not dados_senha or not verificar_senha(dados_senha, senha_atual):
+                    st.error("Sua senha atual está incorreta.")
+                elif senha_nova != confirmar_senha_nova:
+                    st.error("A nova senha e a confirmação não são iguais.")
+                elif senha_atual == senha_nova:
+                    st.error("Escolha uma senha diferente da atual.")
+                else:
+                    ok, mensagem = atualizar_senha_usuario(usuario_menu, senha_nova)
+                    (st.success if ok else st.error)(mensagem)
+                    if ok:
+                        encerrar_sessao()
+                        st.rerun()
+        else:
+            email_recuperacao = str(dados_menu.get("email") or dados_menu.get("google_email") or "").strip()
+            if not email_valido(email_recuperacao):
+                st.warning("Cadastre primeiro um e-mail de recuperação nesta configuração.")
+            else:
+                st.caption(f"O código será enviado para: {email_recuperacao}")
+                if st.button("📧 Enviar código", key="menu_enviar_codigo_recuperacao", use_container_width=True):
+                    try:
+                        enviar_codigo_para_email(email_recuperacao)
+                        st.session_state.recuperacao_usuario = usuario_menu
+                        st.success("Código enviado. Ele expira em 10 minutos.")
+                    except Exception:
+                        st.error("Não consegui enviar o código. Confira as configurações SMTP nos Secrets.")
+                if st.session_state.get("recuperacao_usuario") == usuario_menu:
+                    with st.form("menu_form_confirmar_recuperacao"):
+                        codigo = st.text_input("Código recebido por e-mail", max_chars=6, type="password")
+                        nova = st.text_input("Nova senha", type="password")
+                        confirmar = st.text_input("Confirme a nova senha", type="password")
+                        concluir = st.form_submit_button("Redefinir senha", use_container_width=True)
+                    if concluir:
+                        ok_codigo, msg_codigo = verificar_codigo_recuperacao(codigo, email_recuperacao)
+                        if not ok_codigo:
+                            st.error(msg_codigo)
+                        elif nova != confirmar:
+                            st.error("As senhas não são iguais.")
+                        else:
+                            ok_senha, msg_senha = atualizar_senha_usuario(usuario_menu, nova)
+                            (st.success if ok_senha else st.error)(msg_senha)
+                            if ok_senha:
+                                st.session_state.recuperacao_usuario = ""
+                                encerrar_sessao()
+                                st.rerun()
+
+    with st.expander("📧 Meu e-mail de recuperação", expanded=False):
+        st.caption("Use um e-mail que você consiga acessar. Ele será usado para recuperar a senha do Gepetto.")
+        with st.form("menu_form_atualizar_email"):
+            email_atualizado = st.text_input(
+                "E-mail de recuperação",
+                value=str(dados_menu.get("email", "")),
+                key="menu_email_recuperacao",
+            )
+            senha_confirmacao = st.text_input("Confirme sua senha do Gepetto", type="password", key="menu_email_senha")
+            salvar_email = st.form_submit_button("Salvar e-mail", use_container_width=True)
+        if salvar_email:
+            dados_email = carregar_dados(usuario_menu)
+            email_novo = email_atualizado.strip().casefold()
+            outro_usuario = encontrar_usuario_por_email(email_novo)
+            if not email_valido(email_novo):
+                st.error("Informe um e-mail válido.")
+            elif outro_usuario and outro_usuario.casefold() != usuario_menu.casefold():
+                st.error("Esse e-mail já está vinculado a outra conta.")
+            elif not dados_email or not verificar_senha(dados_email, senha_confirmacao):
+                st.error("A senha atual do Gepetto está incorreta.")
+            else:
+                dados_email["email"] = email_novo
+                if salvar_dados(usuario_menu, dados_email):
+                    st.success("E-mail de recuperação atualizado.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível salvar o e-mail.")
+        if conta_google_vinculada:
+            st.caption("Sua Conta Google continua vinculada para login rápido, mesmo se mudar o e-mail de recuperação.")
+
+    st.divider()
+    if st.button("🚪 Sair da conta", key="menu_sair_conta", use_container_width=True):
+        if encerrar_sessao():
+            st.rerun()
+
+
+# =========================================================
 # CABEÇALHO
 # =========================================================
 
-st.title("🤖 Gepetto AI")
-st.caption("Uma inteligência artificial da Família Bezerra")
+col_titulo, col_menu = st.columns([8, 1])
+with col_titulo:
+    st.title("🤖 Gepetto AI")
+    st.caption("Uma inteligência artificial da Família Bezerra")
+with col_menu:
+    if st.session_state.get("usuario"):
+        with st.popover("⋮", help="Configurações da conta"):
+            st.caption(f"Conta: {st.session_state.get('usuario', '')}")
+            renderizar_configuracoes_conta(st.session_state.get("usuario", ""))
 
 
 # =========================================================
@@ -1749,111 +2052,6 @@ with st.sidebar:
     st.title("💬 Conversas")
     st.caption(f"Conta: {usuario}")
 
-    conta_google_exclusiva = (
-        dados.get("auth_provider") == "google"
-        and not dados.get("senha_hash")
-    )
-
-    if conta_google_exclusiva:
-        st.subheader("🔐 Conta Google")
-        st.caption("Esta é uma conta Google antiga sem senha própria do Gepetto. Saia e entre novamente com Google para concluir a configuração de usuário e senha.")
-        st.markdown("[Recuperar Conta Google](https://accounts.google.com/signin/recovery)")
-    else:
-        with st.expander("📧 Meu e-mail de recuperação"):
-            st.caption("Cadastre um e-mail que você consiga acessar para recuperar a senha.")
-            with st.form("form_atualizar_email_recuperacao"):
-                email_atualizado = st.text_input("E-mail de recuperação", value=str(dados.get("email", "")))
-                senha_para_email = st.text_input("Confirme sua senha atual", type="password")
-                salvar_email = st.form_submit_button("Salvar e-mail", use_container_width=True)
-            if salvar_email:
-                dados_email = carregar_dados(usuario)
-                outro_usuario_email = encontrar_usuario_por_email(email_atualizado)
-                if not email_valido(email_atualizado):
-                    st.error("Informe um e-mail válido.")
-                elif outro_usuario_email and outro_usuario_email.casefold() != usuario.casefold():
-                    st.error("Esse e-mail já está vinculado a outra conta.")
-                elif not dados_email or not verificar_senha(dados_email, senha_para_email):
-                    st.error("A senha atual está incorreta.")
-                else:
-                    dados_email["email"] = email_atualizado.strip()
-                    if salvar_dados(usuario, dados_email):
-                        st.success("E-mail de recuperação atualizado.")
-                        st.rerun()
-                    else:
-                        st.error("Não foi possível salvar o e-mail.")
-
-        with st.expander("🔑 Trocar minha senha"):
-            modo_troca = st.radio(
-                "Como deseja continuar?",
-                ["Sei minha senha atual", "Não sei minha senha atual"],
-                key="modo_troca_senha",
-            )
-
-            if modo_troca == "Sei minha senha atual":
-                with st.form("form_trocar_senha"):
-                    senha_atual = st.text_input(
-                        "Sua senha atual:", type="password", key="troca_senha_atual"
-                    )
-                    senha_nova = st.text_input(
-                        "Sua nova senha:", type="password", key="troca_senha_nova"
-                    )
-                    confirmar_senha_nova = st.text_input(
-                        "Confirme a nova senha:", type="password", key="troca_senha_confirma"
-                    )
-                    enviar_troca_senha = st.form_submit_button(
-                        "Alterar senha", use_container_width=True
-                    )
-
-                if enviar_troca_senha:
-                    dados_senha = carregar_dados(usuario)
-                    if not senha_atual or not senha_nova or not confirmar_senha_nova:
-                        st.error("Preencha os três campos.")
-                    elif not dados_senha or not verificar_senha(dados_senha, senha_atual):
-                        st.error("Sua senha atual está incorreta.")
-                    elif senha_nova != confirmar_senha_nova:
-                        st.error("A nova senha e a confirmação não são iguais.")
-                    elif senha_atual == senha_nova:
-                        st.error("Escolha uma senha diferente da atual.")
-                    else:
-                        ok, mensagem = atualizar_senha_usuario(usuario, senha_nova)
-                        (st.success if ok else st.error)(mensagem)
-                        if ok:
-                            encerrar_sessao()
-                            st.rerun()
-            else:
-                email_recuperacao_conta = str(dados.get("email", "")).strip()
-                if not email_valido(email_recuperacao_conta):
-                    st.warning("Cadastre primeiro um e-mail de recuperação válido na seção acima.")
-                else:
-                    st.caption(f"O código será enviado para: {email_recuperacao_conta}")
-                    if st.button("📧 Enviar código de recuperação", key="enviar_codigo_recuperacao_sessao", use_container_width=True):
-                        try:
-                            enviar_codigo_para_email(email_recuperacao_conta)
-                            st.session_state.recuperacao_usuario = usuario
-                            st.success("Código enviado. Ele expira em 10 minutos.")
-                        except Exception:
-                            st.error("Não foi possível enviar o código. Confira SMTP_EMAIL e SMTP_APP_PASSWORD nos Secrets.")
-
-                    if st.session_state.get("recuperacao_usuario") == usuario:
-                        with st.form("form_recuperacao_sessao"):
-                            codigo_recuperacao_sessao = st.text_input("Código recebido por e-mail", max_chars=6, type="password")
-                            nova_senha_sessao = st.text_input("Sua nova senha", type="password")
-                            confirmar_nova_senha_sessao = st.text_input("Confirme a nova senha", type="password")
-                            concluir_recuperacao_sessao = st.form_submit_button("Verificar código e redefinir", use_container_width=True)
-                        if concluir_recuperacao_sessao:
-                            ok_codigo, msg_codigo = verificar_codigo_recuperacao(codigo_recuperacao_sessao, email_recuperacao_conta)
-                            if not ok_codigo:
-                                st.error(msg_codigo)
-                            elif nova_senha_sessao != confirmar_nova_senha_sessao:
-                                st.error("As senhas não são iguais.")
-                            else:
-                                ok_senha, msg_senha = atualizar_senha_usuario(usuario, nova_senha_sessao)
-                                (st.success if ok_senha else st.error)(msg_senha)
-                                if ok_senha:
-                                    st.session_state.recuperacao_usuario = ""
-                                    encerrar_sessao()
-                                    st.rerun()
-
     if eh_admin(usuario):
         st.caption("🛡️ Conta administrativa")
 
@@ -1944,12 +2142,6 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button("🚪 Sair da conta", use_container_width=True):
-        if encerrar_sessao():
-            st.rerun()
-
-    st.divider()
-
     if st.button("🗑️ Excluir minha conta", use_container_width=True):
         st.session_state.confirmar_exclusao = True
 
@@ -2000,9 +2192,36 @@ if chat_atual:
     st.subheader(chat_atual)
     mensagens = dados["chats"][chat_atual]
 
-    for mensagem in mensagens:
+    for indice_mensagem, mensagem in enumerate(mensagens):
         with st.chat_message(mensagem["role"]):
             st.markdown(mensagem["content"])
+            anexos_mensagem = mensagem.get("attachments", [])
+            if isinstance(anexos_mensagem, list) and anexos_mensagem:
+                for indice_anexo, anexo in enumerate(anexos_mensagem):
+                    caminho = caminho_anexo(usuario, anexo.get("saved_name"))
+                    if not caminho or not caminho.is_file():
+                        st.caption(f"📎 {anexo.get('name', 'Arquivo')} — arquivo não está mais disponível neste servidor.")
+                        continue
+                    if anexo.get("kind") == "image":
+                        st.image(str(caminho), caption=anexo.get("name", "Imagem anexada"), use_container_width=True)
+                        st.download_button(
+                            "Baixar imagem",
+                            data=caminho.read_bytes(),
+                            file_name=anexo.get("name", "imagem.png"),
+                            mime=anexo.get("mime", "image/png"),
+                            key=f"download_img_{indice_mensagem}_{indice_anexo}_{anexo.get('saved_name', '')}",
+                        )
+                    else:
+                        with st.expander(f"📎 {anexo.get('name', 'Arquivo anexado')}", expanded=False):
+                            if anexo.get("text_content"):
+                                st.caption("O texto deste arquivo foi enviado ao Gepetto para análise.")
+                            st.download_button(
+                                "Baixar arquivo",
+                                data=caminho.read_bytes(),
+                                file_name=anexo.get("name", "arquivo"),
+                                mime=anexo.get("mime", "application/octet-stream"),
+                                key=f"download_{indice_mensagem}_{indice_anexo}_{anexo.get('saved_name', '')}",
+                            )
 else:
     st.info("Clique em 'Nova conversa' para começar.")
 
@@ -2011,10 +2230,81 @@ else:
 # RECEBER MENSAGEM
 # =========================================================
 
-pergunta = st.chat_input("Converse com o Gepetto...")
+st.markdown("""
+<style>
+/* Clipe discreto no campo de mensagem (somente botão de anexar). */
+[data-testid="stChatInputFileUploadButton"],
+[data-testid="stChatInputUploadButton"],
+.stChatInput button[aria-label*="attach" i],
+.stChatInput button[aria-label*="anexar" i] {
+    color: rgba(255, 255, 255, 0.72) !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    opacity: 0.68;
+    transition: opacity 120ms ease;
+}
+[data-testid="stChatInputFileUploadButton"] svg,
+[data-testid="stChatInputUploadButton"] svg,
+.stChatInput button[aria-label*="attach" i] svg,
+.stChatInput button[aria-label*="anexar" i] svg {
+    color: rgba(255, 255, 255, 0.78) !important;
+    stroke: currentColor !important;
+}
+[data-testid="stChatInputFileUploadButton"]:hover,
+[data-testid="stChatInputUploadButton"]:hover,
+.stChatInput button[aria-label*="attach" i]:hover,
+.stChatInput button[aria-label*="anexar" i]:hover {
+    opacity: 1;
+}
+</style>
+""", unsafe_allow_html=True)
+st.caption("Anexe até 15 fotos e 6 arquivos por mensagem (máximo de 5 MB por arquivo). O Gepetto pode analisar os anexos, mas não cria imagens novas.")
 
-if pergunta:
-    texto = pergunta.strip()
+entrada_chat = st.chat_input(
+    "Converse com o Gepetto...",
+    accept_file="multiple",
+    file_type=EXTENSOES_UPLOAD,
+)
+
+if entrada_chat:
+    if isinstance(entrada_chat, str):
+        texto = entrada_chat.strip()
+        arquivos_enviados = []
+    else:
+        texto = str(getattr(entrada_chat, "text", "") or "").strip()
+        arquivos_enviados = list(getattr(entrada_chat, "files", []) or [])
+
+    fotos_enviadas = [
+        arquivo for arquivo in arquivos_enviados
+        if Path(str(arquivo.name)).suffix.lower().lstrip(".") in EXTENSOES_IMAGEM
+    ]
+    documentos_enviados = [arquivo for arquivo in arquivos_enviados if arquivo not in fotos_enviadas]
+    if len(fotos_enviadas) > MAX_FOTOS_POR_ENVIO:
+        st.error(f"Você pode enviar até {MAX_FOTOS_POR_ENVIO} fotos por mensagem.")
+        st.stop()
+    if len(documentos_enviados) > MAX_ARQUIVOS_POR_ENVIO:
+        st.error(f"Você pode enviar até {MAX_ARQUIVOS_POR_ENVIO} arquivos por mensagem, além das fotos.")
+        st.stop()
+    arquivos_grandes = [arquivo.name for arquivo in arquivos_enviados if getattr(arquivo, "size", 0) > TAMANHO_MAXIMO_ARQUIVO]
+    if arquivos_grandes:
+        st.error(f"Cada arquivo pode ter no máximo {TAMANHO_MAXIMO_ARQUIVO_MB} MB: " + ", ".join(arquivos_grandes[:3]))
+        st.stop()
+    if not texto and not arquivos_enviados:
+        st.stop()
+    if not texto:
+        texto = "Analise os arquivos e as fotos anexados e me ajude com eles."
+
+    anexos_nova_mensagem = []
+    try:
+        for arquivo_enviado in arquivos_enviados:
+            anexos_nova_mensagem.append(salvar_anexo(usuario, arquivo_enviado))
+    except ValueError as erro_upload:
+        st.error(str(erro_upload))
+        st.stop()
+    except OSError:
+        st.error("Não consegui salvar os anexos. Tente novamente.")
+        st.stop()
 
     # -----------------------------------------------------
     # SOLICITAÇÕES DE PERMISSÃO PELO PAINEL DE ADM
@@ -2134,6 +2424,7 @@ if pergunta:
     mensagens.append({
         "role": "user",
         "content": pergunta_limpa,
+        **({"attachments": anexos_nova_mensagem} if anexos_nova_mensagem else {}),
     })
 
     st.session_state.resposta_modo_admin = (
@@ -2155,6 +2446,7 @@ if dados["chat_atual"]:
     mensagens = dados["chats"][dados["chat_atual"]]
 
     if mensagens and mensagens[-1]["role"] == "user":
+        mensagem_usuario = mensagens[-1]
         modo_admin_desta_resposta = st.session_state.get(
             "resposta_modo_admin",
             False,
@@ -2164,25 +2456,44 @@ if dados["chat_atual"]:
             area_resposta = st.empty()
 
             try:
-                prompt = (
-                    PROMPT_ADMIN
-                    if modo_admin_desta_resposta
-                    else PROMPT_PADRAO
-                )
+                prompt = PROMPT_ADMIN if modo_admin_desta_resposta else PROMPT_PADRAO
+                mensagens_api = [{"role": "system", "content": prompt}]
 
-                mensagens_api = [
-                    {
-                        "role": "system",
-                        "content": prompt,
-                    }
-                ]
+                # As fotos são analisadas em pequenos lotes para respeitar os limites do modelo visual.
+                anexos_usuario = mensagem_usuario.get("attachments", [])
+                if anexos_usuario and any(a.get("kind") == "image" for a in anexos_usuario):
+                    try:
+                        resumo_visual = analisar_imagens_anexadas(usuario, anexos_usuario)
+                        if resumo_visual:
+                            mensagem_usuario["attachment_summary"] = resumo_visual[:30000]
+                            if not salvar_dados(usuario, dados):
+                                st.warning("Não consegui guardar o resumo das fotos no histórico.")
+                    except Exception:
+                        mensagem_usuario["attachment_summary"] = "Não consegui analisar automaticamente uma ou mais fotos anexadas."
 
-                for mensagem in mensagens[-30:]:
-                    if mensagem["role"] in ("user", "assistant"):
-                        mensagens_api.append({
-                            "role": mensagem["role"],
-                            "content": mensagem["content"],
-                        })
+                for mensagem in mensagens[-12:]:
+                    if mensagem.get("role") not in ("user", "assistant"):
+                        continue
+                    conteudo_texto = str(mensagem.get("content", ""))
+                    anexos_mensagem = mensagem.get("attachments", [])
+                    if isinstance(anexos_mensagem, list):
+                        partes_documentos = []
+                        for anexo in anexos_mensagem:
+                            texto_arquivo = anexo.get("text_content", "")
+                            if texto_arquivo:
+                                partes_documentos.append(
+                                    f"[Conteúdo extraído de {anexo.get('name', 'arquivo')}]\n{texto_arquivo}"
+                                )
+                        if partes_documentos:
+                            conteudo_texto += "\n\n" + "\n\n".join(partes_documentos)
+                    resumo_visual_salvo = mensagem.get("attachment_summary", "")
+                    if resumo_visual_salvo:
+                        conteudo_texto += "\n\n[Análise visual das fotos anexadas]\n" + resumo_visual_salvo
+                    limite_contexto = 30000 if mensagem is mensagem_usuario else 4000
+                    mensagens_api.append({
+                        "role": mensagem["role"],
+                        "content": conteudo_texto[:limite_contexto],
+                    })
 
                 resposta = cliente.chat.completions.create(
                     model=MODELO,
@@ -2195,25 +2506,15 @@ if dados["chat_atual"]:
                     resposta.choices[0].message.content
                     or "Não consegui gerar uma resposta."
                 )
-
                 area_resposta.markdown(texto_resposta)
-
-                mensagens.append({
-                    "role": "assistant",
-                    "content": texto_resposta,
-                })
-
+                mensagens.append({"role": "assistant", "content": texto_resposta})
                 if not salvar_dados(usuario, dados):
-                    st.error(
-                        "Não foi possível salvar a resposta no histórico."
-                    )
+                    st.error("Não foi possível salvar a resposta no histórico.")
 
             except Exception:
                 area_resposta.error(
-                    "Não consegui responder agora. "
-                    "Confira a conexão e tente novamente."
+                    "Não consegui responder agora. Confira a conexão e tente novamente."
                 )
-
             finally:
                 st.session_state.resposta_modo_admin = False
 
