@@ -34,7 +34,7 @@ PASTA_UPLOADS.mkdir(parents=True, exist_ok=True)
 TAMANHO_MAXIMO_ARQUIVO_MB = 5
 TAMANHO_MAXIMO_ARQUIVO = TAMANHO_MAXIMO_ARQUIVO_MB * 1024 * 1024
 MAX_FOTOS_POR_ENVIO = 15
-MAX_ARQUIVOS_POR_ENVIO = 6
+MAX_ARQUIVOS_POR_ENVIO = 5
 EXTENSOES_IMAGEM = {"png", "jpg", "jpeg", "webp"}
 EXTENSOES_TEXTO = {"txt", "md", "csv", "json", "py", "html", "css", "js", "xml", "yaml", "yml", "toml", "ini", "log"}
 EXTENSOES_DOCUMENTO = {"pdf", "docx", "xlsx"}
@@ -1758,12 +1758,53 @@ def renderizar_configuracoes_conta(usuario_menu):
 # CABEÇALHO
 # =========================================================
 
-col_titulo, col_menu = st.columns([8, 1])
-with col_titulo:
-    st.title("🤖 Gepetto AI")
-    st.caption("Uma inteligência artificial da Família Bezerra")
-with col_menu:
-    if st.session_state.get("usuario"):
+# O menu fica fixo no canto superior direito, na posição marcada pelo usuário,
+# mesmo quando a conversa é rolada para cima ou para baixo.
+st.markdown("""
+<style>
+.st-key-gepetto_menu_fixo {
+    position: fixed !important;
+    top: 50px !important;
+    right: 34px !important;
+    z-index: 99999 !important;
+    width: max-content !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.st-key-gepetto_menu_fixo > div,
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] {
+    width: max-content !important;
+    min-width: 0 !important;
+}
+.st-key-gepetto_menu_fixo button {
+    min-width: 44px !important;
+    min-height: 44px !important;
+    padding: 0 8px !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    box-shadow: none !important;
+    color: rgba(255, 255, 255, 0.88) !important;
+    font-size: 22px !important;
+}
+.st-key-gepetto_menu_fixo button:hover {
+    background: rgba(255, 255, 255, 0.08) !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+}
+@media (max-width: 700px) {
+    .st-key-gepetto_menu_fixo {
+        top: 44px !important;
+        right: 12px !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🤖 Gepetto AI")
+st.caption("Uma inteligência artificial da Família Bezerra")
+
+if st.session_state.get("usuario"):
+    with st.container(key="gepetto_menu_fixo"):
         with st.popover("⋮", help="Configurações da conta"):
             st.caption(f"Conta: {st.session_state.get('usuario', '')}")
             renderizar_configuracoes_conta(st.session_state.get("usuario", ""))
@@ -2203,7 +2244,15 @@ if chat_atual:
                         st.caption(f"📎 {anexo.get('name', 'Arquivo')} — arquivo não está mais disponível neste servidor.")
                         continue
                     if anexo.get("kind") == "image":
-                        st.image(str(caminho), caption=anexo.get("name", "Imagem anexada"), use_container_width=True)
+                        # Exibe miniatura compacta (máximo de 280 × 280 px), mantendo o arquivo original para download.
+                        try:
+                            from PIL import Image
+                            with Image.open(caminho) as imagem_original:
+                                miniatura = imagem_original.copy()
+                                miniatura.thumbnail((280, 280))
+                            st.image(miniatura, caption=anexo.get("name", "Imagem anexada"), width=280)
+                        except Exception:
+                            st.caption(f"📷 {anexo.get('name', 'Imagem anexada')} — não foi possível mostrar a miniatura.")
                         st.download_button(
                             "Baixar imagem",
                             data=caminho.read_bytes(),
@@ -2259,7 +2308,7 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-st.caption("Anexe até 15 fotos e 6 arquivos por mensagem (máximo de 5 MB por arquivo). O Gepetto pode analisar os anexos, mas não cria imagens novas.")
+st.caption("Anexe até 15 fotos e 5 arquivos por mensagem (máximo de 5 MB por arquivo). O Gepetto pode analisar os anexos, mas não cria imagens novas.")
 
 entrada_chat = st.chat_input(
     "Converse com o Gepetto...",
@@ -2284,7 +2333,7 @@ if entrada_chat:
         st.error(f"Você pode enviar até {MAX_FOTOS_POR_ENVIO} fotos por mensagem.")
         st.stop()
     if len(documentos_enviados) > MAX_ARQUIVOS_POR_ENVIO:
-        st.error(f"Você pode enviar até {MAX_ARQUIVOS_POR_ENVIO} arquivos por mensagem, além das fotos.")
+        st.error(f"Você pode enviar até {MAX_ARQUIVOS_POR_ENVIO} arquivos por mensagem, além das fotos (máximo de 5 MB por arquivo).")
         st.stop()
     arquivos_grandes = [arquivo.name for arquivo in arquivos_enviados if getattr(arquivo, "size", 0) > TAMANHO_MAXIMO_ARQUIVO]
     if arquivos_grandes:
