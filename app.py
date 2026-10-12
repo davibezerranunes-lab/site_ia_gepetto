@@ -1850,8 +1850,11 @@ st.markdown("""
     min-width: 40px !important;
     pointer-events: auto !important;
 }
-/* Estiliza apenas o botão que abre o popover, não os botões dentro do menu. */
-.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button {
+
+/* Botão de três pontos: círculo preto sólido, igual à referência. */
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button,
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"],
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"] {
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
@@ -1862,25 +1865,58 @@ st.markdown("""
     height: 40px !important;
     min-height: 40px !important;
     padding: 0 !important;
+    margin: 0 !important;
     border-radius: 50% !important;
-    background: rgba(0, 0, 0, 0.90) !important;
-    border: 1px solid rgba(255, 255, 255, 0.24) !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18) !important;
+    background: #000000 !important;
+    background-color: #000000 !important;
+    background-image: none !important;
+    border: 1px solid #000000 !important;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18) !important;
     color: #ffffff !important;
-    font-size: 22px !important;
+    font-size: 14px !important;
+    font-weight: 700 !important;
+    letter-spacing: 1px !important;
     line-height: 1 !important;
-    opacity: 0.94 !important;
-    transition: background 120ms ease, opacity 120ms ease, transform 120ms ease !important;
-}
-.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:hover,
-.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:focus-visible {
-    background: rgba(0, 0, 0, 0.98) !important;
-    border-color: rgba(255, 255, 255, 0.48) !important;
     opacity: 1 !important;
+    outline: none !important;
+    -webkit-appearance: none !important;
+    appearance: none !important;
+    transition: box-shadow 120ms ease, transform 120ms ease !important;
 }
-.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:active {
+
+/* Streamlit aplica estilos distintos em hover/foco/aberto; mantém sempre opaco. */
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:hover,
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:focus,
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:focus-visible,
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:active,
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button[aria-expanded="true"],
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button[data-state="open"],
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:hover,
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:focus,
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:focus-visible,
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:active,
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"][aria-expanded="true"],
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"][data-state="open"],
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:hover,
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:focus,
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:focus-visible,
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:active,
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"][aria-expanded="true"],
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"][data-state="open"] {
+    background: #000000 !important;
+    background-color: #000000 !important;
+    background-image: none !important;
+    color: #ffffff !important;
+    border-color: #000000 !important;
+    opacity: 1 !important;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28) !important;
+}
+.st-key-gepetto_menu_fixo [data-testid="stPopover"] > button:active,
+.st-key-gepetto_menu_fixo [data-testid="stPopoverButton"]:active,
+.st-key-gepetto_menu_fixo button[aria-haspopup="dialog"]:active {
     transform: scale(0.96) !important;
 }
+
 @media (max-width: 700px) {
     .st-key-gepetto_menu_fixo {
         top: 46px !important;
@@ -1893,13 +1929,15 @@ st.markdown("""
         width: 38px !important;
         min-width: 38px !important;
     }
-    .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button {
+    .st-key-gepetto_menu_fixo [data-testid="stPopover"] > button,
+    .st-key-gepetto_menu_fixo [data-testid="stPopoverButton"],
+    .st-key-gepetto_menu_fixo button[aria-haspopup="dialog"] {
         width: 38px !important;
         min-width: 38px !important;
         max-width: 38px !important;
         height: 38px !important;
         min-height: 38px !important;
-        font-size: 21px !important;
+        font-size: 13px !important;
     }
 }
 </style>
@@ -1910,7 +1948,7 @@ st.caption("Uma inteligência artificial da Família Bezerra")
 
 if st.session_state.get("usuario"):
     with st.container(key="gepetto_menu_fixo"):
-        with st.popover("⋮", help="Configurações da conta"):
+        with st.popover("•••", help="Configurações da conta"):
             usuario_menu_atual = st.session_state.get("usuario", "")
             st.caption(f"Conta: {usuario_menu_atual}")
             if eh_admin(usuario_menu_atual):
