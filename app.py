@@ -469,8 +469,15 @@ def validar_token(usuario, token):
 # CADASTRO
 # =========================================================
 
-def criar_conta(usuario, senha):
+def criar_conta(usuario, senha, email):
     usuario = usuario.strip()
+    email = str(email or "").strip()
+
+    if not email_valido(email):
+        return False, "Informe um e-mail válido para recuperação da conta."
+
+    if encontrar_usuario_por_email(email):
+        return False, "Esse e-mail já está vinculado a outra conta."
 
     if len(usuario) < 3:
         return False, "O usuário precisa ter pelo menos 3 caracteres."
@@ -491,6 +498,8 @@ def criar_conta(usuario, senha):
 
     dados = {
         "usuario": usuario,
+        "email": email,
+        "google_email": "",
         "salt": salt,
         "senha_hash": senha_hash,
         "token_hash": "",
@@ -686,6 +695,92 @@ def enviar_codigo_email(usuario_solicitante):
 
     st.session_state.codigo_admin_expira = time.time() + 300
     st.session_state.codigo_admin_tentativas = 0
+
+
+def email_valido(email):
+    email = str(email or "").strip()
+    return len(email) <= 254 and "@" in email and "." in email.rsplit("@", 1)[-1] and " " not in email
+
+
+def enviar_codigo_para_email(destinatario, assunto="Recuperação de senha — Gepetto AI"):
+    """Envia código temporário para o e-mail cadastrado na conta."""
+    destinatario = str(destinatario or "").strip()
+    if not email_valido(destinatario):
+        raise ValueError("O e-mail cadastrado não é válido.")
+
+    codigo = f"{secrets.randbelow(1_000_000):06d}"
+    mensagem = EmailMessage()
+    mensagem["Subject"] = assunto
+    mensagem["From"] = st.secrets["SMTP_EMAIL"]
+    mensagem["To"] = destinatario
+    mensagem.set_content(
+        "Você solicitou uma verificação no Gepetto AI.\n\n"
+        f"Seu código é: {codigo}\n"
+        "Ele expira em 10 minutos. Se você não solicitou isso, ignore esta mensagem."
+    )
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as servidor:
+        servidor.login(st.secrets["SMTP_EMAIL"], st.secrets["SMTP_APP_PASSWORD"])
+        servidor.send_message(mensagem)
+
+    st.session_state.recuperacao_codigo_hash = hashlib.sha256(codigo.encode("utf-8")).hexdigest()
+    st.session_state.recuperacao_codigo_expira = time.time() + 600
+    st.session_state.recuperacao_codigo_tentativas = 0
+    st.session_state.recuperacao_email_destino = destinatario.casefold()
+
+
+def verificar_codigo_recuperacao(codigo, email_esperado):
+    if time.time() > st.session_state.get("recuperacao_codigo_expira", 0):
+        st.session_state.recuperacao_codigo_hash = ""
+        return False, "O código expirou. Solicite outro."
+    if st.session_state.get("recuperacao_email_destino", "") != str(email_esperado).strip().casefold():
+        return False, "O código não corresponde ao e-mail selecionado."
+
+    esperado = st.session_state.get("recuperacao_codigo_hash", "")
+    recebido = hashlib.sha256(str(codigo).strip().encode("utf-8")).hexdigest()
+    if esperado and hmac.compare_digest(esperado, recebido):
+        st.session_state.recuperacao_codigo_verificado_ate = time.time() + 600
+        st.session_state.recuperacao_codigo_hash = ""
+        return True, "E-mail verificado. Você pode redefinir a senha."
+
+    tentativas = int(st.session_state.get("recuperacao_codigo_tentativas", 0)) + 1
+    st.session_state.recuperacao_codigo_tentativas = tentativas
+    if tentativas >= 5:
+        st.session_state.recuperacao_codigo_hash = ""
+        return False, "Limite de tentativas atingido. Solicite um novo código."
+    return False, f"Código incorreto ({tentativas}/5)."
+
+
+def encontrar_usuario_por_email(email):
+    email = str(email or "").strip().casefold()
+    if not email:
+        return None
+    for arquivo in PASTA_DADOS.glob("*.json"):
+        if arquivo.name == ARQUIVO_SOLICITACOES.name:
+            continue
+        try:
+            bruto = json.loads(arquivo.read_text(encoding="utf-8"))
+            if isinstance(bruto, dict) and str(bruto.get("email", "")).strip().casefold() == email:
+                nome = bruto.get("usuario")
+                if isinstance(nome, str) and nome.strip():
+                    return nome.strip()
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+    return None
+
+
+def autenticar_google_se_configurado():
+    """Usa o login OIDC nativo do Streamlit quando o provider Google estiver configurado."""
+    try:
+        auth = st.secrets.get("auth", {})
+        google = auth.get("google", {}) if hasattr(auth, "get") else {}
+        return bool(
+            auth.get("redirect_uri") and auth.get("cookie_secret")
+            and google.get("client_id") and google.get("client_secret")
+            and google.get("server_metadata_url")
+        )
+    except Exception:
+        return False
 
 
 def iniciar_verificacao(comando, usuario_solicitante):
@@ -948,8 +1043,9 @@ def mostrar_painel_admin(usuario_atual):
 
                     st.markdown("#### 🔐 Redefinir senha deste usuário")
                     st.caption(
-                        "Por segurança, a senha atual não pode ser visualizada. "
-                        "Verifique o e-mail do ADM para autorizar uma redefinição."
+                        "A senha original não pode ser visualizada. Para redefinir pelo painel, "
+                        "o ADM precisa verificar seu próprio e-mail. O usuário também pode "
+                        "recuperar a própria conta pelo e-mail cadastrado na tela de login."
                     )
                     if not st.session_state.get("admin_reset_email_verificado", False):
                         if st.button(
@@ -986,6 +1082,12 @@ def mostrar_painel_admin(usuario_atual):
                             st.session_state.admin_reset_codigo_pendente = False
                             st.warning("A verificação expirou. Verifique o e-mail novamente.")
                         else:
+                            st.success("E-mail do ADM verificado.")
+                            st.info(
+                                "Senha atual: protegida e não recuperável. "
+                                "O sistema armazena somente um hash, então a senha original não pode ser exibida. "
+                                "Você pode definir uma nova senha abaixo."
+                            )
                             with st.form("form_admin_redefinir_senha_usuario"):
                                 senha_admin_nova = st.text_input(
                                     "Nova senha para o usuário", type="password"
@@ -1196,6 +1298,24 @@ st.caption("Uma inteligência artificial da Família Bezerra")
 # LOGIN E CADASTRO
 # =========================================================
 
+# Se o OAuth do Google já autenticou uma pessoa, vincula o e-mail a uma conta existente.
+# Contas novas precisam escolher usuário e criar uma senha local; o Google não cria a senha.
+if not st.session_state.usuario and autenticar_google_se_configurado():
+    try:
+        if st.user.is_logged_in:
+            email_google = str(st.user.email or "").strip().casefold()
+            if email_valido(email_google):
+                usuario_google = encontrar_usuario_por_email(email_google)
+                if usuario_google:
+                    dados_google = carregar_dados(usuario_google)
+                    if dados_google and not dados_google.get("bloqueado", False):
+                        if gerar_sessao(usuario_google):
+                            st.rerun()
+                else:
+                    st.session_state.google_email_novo = email_google
+    except Exception:
+        pass
+
 if not st.session_state.usuario:
     aba_login, aba_cadastro = st.tabs(["Entrar", "Criar conta"])
 
@@ -1233,6 +1353,50 @@ if not st.session_state.usuario:
             else:
                 st.error("Usuário ou senha incorretos.")
 
+        st.divider()
+        if autenticar_google_se_configurado():
+            if st.button("🔐 Continuar com Google", use_container_width=True, key="login_google"):
+                st.login("google")
+        else:
+            st.caption("Login Google: configure as credenciais OAuth do Google nos Secrets do Streamlit para ativar.")
+
+        with st.expander("Esqueci minha senha"):
+            email_recuperacao = st.text_input("E-mail cadastrado na conta", key="email_recuperacao_login")
+            if st.button("Enviar código de recuperação", use_container_width=True, key="enviar_recuperacao_login"):
+                if not email_valido(email_recuperacao):
+                    st.error("Informe um e-mail válido.")
+                else:
+                    usuario_recuperacao = encontrar_usuario_por_email(email_recuperacao)
+                    if not usuario_recuperacao:
+                        st.error("Não encontramos uma conta vinculada a esse e-mail.")
+                    else:
+                        try:
+                            enviar_codigo_para_email(email_recuperacao)
+                            st.session_state.recuperacao_usuario = usuario_recuperacao
+                            st.success("Código enviado para o e-mail cadastrado. Ele expira em 10 minutos.")
+                        except Exception:
+                            st.error("Não foi possível enviar o código. Confira SMTP_EMAIL e SMTP_APP_PASSWORD nos Secrets.")
+
+            if st.session_state.get("recuperacao_usuario"):
+                with st.form("form_confirmar_recuperacao_login"):
+                    codigo_recuperacao = st.text_input("Código recebido por e-mail", max_chars=6, type="password")
+                    nova_senha_recuperada = st.text_input("Nova senha", type="password")
+                    confirmar_senha_recuperada = st.text_input("Confirme a nova senha", type="password")
+                    confirmar_recuperacao = st.form_submit_button("Verificar código e redefinir senha", use_container_width=True)
+                if confirmar_recuperacao:
+                    ok_codigo, msg_codigo = verificar_codigo_recuperacao(codigo_recuperacao, email_recuperacao)
+                    if not ok_codigo:
+                        st.error(msg_codigo)
+                    elif nova_senha_recuperada != confirmar_senha_recuperada:
+                        st.error("As senhas não são iguais.")
+                    else:
+                        ok_senha, msg_senha = atualizar_senha_usuario(st.session_state.recuperacao_usuario, nova_senha_recuperada)
+                        (st.success if ok_senha else st.error)(msg_senha)
+                        if ok_senha:
+                            st.session_state.recuperacao_usuario = ""
+                            st.session_state.recuperacao_codigo_verificado_ate = 0
+                            st.info("Agora entre com sua nova senha.")
+
     with aba_cadastro:
         st.subheader("Criar sua conta")
 
@@ -1241,6 +1405,8 @@ if not st.session_state.usuario:
                 "Escolha um usuário",
                 max_chars=30,
             )
+
+            novo_email = st.text_input("Seu e-mail para recuperação", value=st.session_state.get("google_email_novo", ""))
 
             nova_senha = st.text_input(
                 "Escolha uma senha",
@@ -1264,6 +1430,7 @@ if not st.session_state.usuario:
                 sucesso, mensagem = criar_conta(
                     novo_usuario,
                     nova_senha,
+                    novo_email,
                 )
 
                 if sucesso:
@@ -1309,38 +1476,100 @@ with st.sidebar:
     st.title("💬 Conversas")
     st.caption(f"Conta: {usuario}")
 
-    with st.expander("🔑 Trocar minha senha"):
-        with st.form("form_trocar_senha"):
-            senha_atual = st.text_input(
-                "Sua senha atual:", type="password", key="troca_senha_atual"
-            )
-            senha_nova = st.text_input(
-                "Sua nova senha:", type="password", key="troca_senha_nova"
-            )
-            confirmar_senha_nova = st.text_input(
-                "Confirme a nova senha:", type="password", key="troca_senha_confirma"
-            )
-            enviar_troca_senha = st.form_submit_button(
-                "Alterar senha", use_container_width=True
-            )
-
-        if enviar_troca_senha:
-            dados_senha = carregar_dados(usuario)
-            if not senha_atual or not senha_nova or not confirmar_senha_nova:
-                st.error("Preencha os três campos.")
-            elif not dados_senha or not verificar_senha(dados_senha, senha_atual):
-                st.error("Sua senha atual está incorreta.")
-            elif senha_nova != confirmar_senha_nova:
-                st.error("A nova senha e a confirmação não são iguais.")
-            elif senha_atual == senha_nova:
-                st.error("Escolha uma senha diferente da atual.")
+    with st.expander("📧 Meu e-mail de recuperação"):
+        st.caption("Cadastre um e-mail que você consiga acessar para recuperar a senha.")
+        with st.form("form_atualizar_email_recuperacao"):
+            email_atualizado = st.text_input("E-mail de recuperação", value=str(dados.get("email", "")))
+            senha_para_email = st.text_input("Confirme sua senha atual", type="password")
+            salvar_email = st.form_submit_button("Salvar e-mail", use_container_width=True)
+        if salvar_email:
+            dados_email = carregar_dados(usuario)
+            outro_usuario_email = encontrar_usuario_por_email(email_atualizado)
+            if not email_valido(email_atualizado):
+                st.error("Informe um e-mail válido.")
+            elif outro_usuario_email and outro_usuario_email.casefold() != usuario.casefold():
+                st.error("Esse e-mail já está vinculado a outra conta.")
+            elif not dados_email or not verificar_senha(dados_email, senha_para_email):
+                st.error("A senha atual está incorreta.")
             else:
-                ok, mensagem = atualizar_senha_usuario(usuario, senha_nova)
-                (st.success if ok else st.error)(mensagem)
-                if ok:
-                    st.info("Por segurança, você será desconectado. Entre com a nova senha.")
-                    encerrar_sessao()
+                dados_email["email"] = email_atualizado.strip()
+                if salvar_dados(usuario, dados_email):
+                    st.success("E-mail de recuperação atualizado.")
                     st.rerun()
+                else:
+                    st.error("Não foi possível salvar o e-mail.")
+
+    with st.expander("🔑 Trocar minha senha"):
+        modo_troca = st.radio(
+            "Como deseja continuar?",
+            ["Sei minha senha atual", "Não sei minha senha atual"],
+            key="modo_troca_senha",
+        )
+
+        if modo_troca == "Sei minha senha atual":
+            with st.form("form_trocar_senha"):
+                senha_atual = st.text_input(
+                    "Sua senha atual:", type="password", key="troca_senha_atual"
+                )
+                senha_nova = st.text_input(
+                    "Sua nova senha:", type="password", key="troca_senha_nova"
+                )
+                confirmar_senha_nova = st.text_input(
+                    "Confirme a nova senha:", type="password", key="troca_senha_confirma"
+                )
+                enviar_troca_senha = st.form_submit_button(
+                    "Alterar senha", use_container_width=True
+                )
+
+            if enviar_troca_senha:
+                dados_senha = carregar_dados(usuario)
+                if not senha_atual or not senha_nova or not confirmar_senha_nova:
+                    st.error("Preencha os três campos.")
+                elif not dados_senha or not verificar_senha(dados_senha, senha_atual):
+                    st.error("Sua senha atual está incorreta.")
+                elif senha_nova != confirmar_senha_nova:
+                    st.error("A nova senha e a confirmação não são iguais.")
+                elif senha_atual == senha_nova:
+                    st.error("Escolha uma senha diferente da atual.")
+                else:
+                    ok, mensagem = atualizar_senha_usuario(usuario, senha_nova)
+                    (st.success if ok else st.error)(mensagem)
+                    if ok:
+                        encerrar_sessao()
+                        st.rerun()
+        else:
+            email_recuperacao_conta = str(dados.get("email", "")).strip()
+            if not email_valido(email_recuperacao_conta):
+                st.warning("Cadastre primeiro um e-mail de recuperação válido na seção acima.")
+            else:
+                st.caption(f"O código será enviado para: {email_recuperacao_conta}")
+                if st.button("📧 Enviar código de recuperação", key="enviar_codigo_recuperacao_sessao", use_container_width=True):
+                    try:
+                        enviar_codigo_para_email(email_recuperacao_conta)
+                        st.session_state.recuperacao_usuario = usuario
+                        st.success("Código enviado. Ele expira em 10 minutos.")
+                    except Exception:
+                        st.error("Não foi possível enviar o código. Confira SMTP_EMAIL e SMTP_APP_PASSWORD nos Secrets.")
+
+                if st.session_state.get("recuperacao_usuario") == usuario:
+                    with st.form("form_recuperacao_sessao"):
+                        codigo_recuperacao_sessao = st.text_input("Código recebido por e-mail", max_chars=6, type="password")
+                        nova_senha_sessao = st.text_input("Sua nova senha", type="password")
+                        confirmar_nova_senha_sessao = st.text_input("Confirme a nova senha", type="password")
+                        concluir_recuperacao_sessao = st.form_submit_button("Verificar código e redefinir", use_container_width=True)
+                    if concluir_recuperacao_sessao:
+                        ok_codigo, msg_codigo = verificar_codigo_recuperacao(codigo_recuperacao_sessao, email_recuperacao_conta)
+                        if not ok_codigo:
+                            st.error(msg_codigo)
+                        elif nova_senha_sessao != confirmar_nova_senha_sessao:
+                            st.error("As senhas não são iguais.")
+                        else:
+                            ok_senha, msg_senha = atualizar_senha_usuario(usuario, nova_senha_sessao)
+                            (st.success if ok_senha else st.error)(msg_senha)
+                            if ok_senha:
+                                st.session_state.recuperacao_usuario = ""
+                                encerrar_sessao()
+                                st.rerun()
 
     if eh_admin(usuario):
         st.caption("🛡️ Conta administrativa")
