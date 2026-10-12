@@ -424,6 +424,27 @@ def verificar_senha(dados, senha):
         return False
 
 
+def atualizar_senha_usuario(nome_usuario, nova_senha):
+    """Atualiza senha usando hash com salt; nunca armazena senha em texto puro."""
+    if not isinstance(nova_senha, str) or len(nova_senha) < 6:
+        return False, "A nova senha precisa ter pelo menos 6 caracteres."
+
+    dados = carregar_dados(nome_usuario)
+    if not dados:
+        return False, "Não foi possível encontrar essa conta."
+
+    salt, senha_hash = gerar_senha(nova_senha)
+    dados["salt"] = salt
+    dados["senha_hash"] = senha_hash
+    # Revoga a sessão existente para exigir novo login após redefinição.
+    dados["token_hash"] = ""
+
+    if not salvar_dados(nome_usuario, dados):
+        return False, "Não foi possível salvar a nova senha."
+
+    return True, "Senha alterada com sucesso. Entre novamente na conta."
+
+
 def validar_token(usuario, token):
     if not usuario or not token:
         return False
@@ -924,6 +945,70 @@ def mostrar_painel_admin(usuario_atual):
                         else "Ativa"
                     )
                     st.write(f"**Status atual:** {status}")
+
+                    st.markdown("#### 🔐 Redefinir senha deste usuário")
+                    st.caption(
+                        "Por segurança, a senha atual não pode ser visualizada. "
+                        "Verifique o e-mail do ADM para autorizar uma redefinição."
+                    )
+                    if not st.session_state.get("admin_reset_email_verificado", False):
+                        if st.button(
+                            "📧 Enviar código para o e-mail do ADM",
+                            key="enviar_codigo_reset_senha_admin",
+                            use_container_width=True,
+                        ):
+                            try:
+                                enviar_codigo_email(usuario_atual)
+                                st.session_state.admin_reset_codigo_pendente = True
+                                st.success("Código enviado para o e-mail configurado do ADM.")
+                            except Exception:
+                                st.error("Não foi possível enviar o código. Confira SMTP_EMAIL e SMTP_APP_PASSWORD nos Secrets.")
+
+                        if st.session_state.get("admin_reset_codigo_pendente", False):
+                            with st.form("form_verificar_codigo_reset_senha"):
+                                codigo_reset = st.text_input(
+                                    "Código recebido por e-mail", max_chars=6, type="password"
+                                )
+                                verificar_reset = st.form_submit_button(
+                                    "Verificar código", use_container_width=True
+                                )
+                            if verificar_reset:
+                                if verificar_codigo(codigo_reset):
+                                    st.session_state.admin_reset_email_verificado = True
+                                    st.session_state.admin_reset_codigo_pendente = False
+                                    st.session_state.admin_reset_verificado_ate = time.time() + 300
+                                    st.success("E-mail verificado. Você pode redefinir uma senha por até 5 minutos.")
+                                    st.rerun()
+                    else:
+                        expiracao_reset = st.session_state.get("admin_reset_verificado_ate", 0)
+                        if time.time() > expiracao_reset:
+                            st.session_state.admin_reset_email_verificado = False
+                            st.session_state.admin_reset_codigo_pendente = False
+                            st.warning("A verificação expirou. Verifique o e-mail novamente.")
+                        else:
+                            with st.form("form_admin_redefinir_senha_usuario"):
+                                senha_admin_nova = st.text_input(
+                                    "Nova senha para o usuário", type="password"
+                                )
+                                confirmar_admin_nova = st.text_input(
+                                    "Confirme a nova senha", type="password"
+                                )
+                                redefinir_admin_senha = st.form_submit_button(
+                                    "Redefinir senha", use_container_width=True
+                                )
+                            if redefinir_admin_senha:
+                                if senha_admin_nova != confirmar_admin_nova:
+                                    st.error("As senhas não são iguais.")
+                                else:
+                                    ok, mensagem = atualizar_senha_usuario(
+                                        selecionado, senha_admin_nova
+                                    )
+                                    (st.success if ok else st.error)(mensagem)
+                                    if ok:
+                                        st.session_state.admin_reset_email_verificado = False
+                                        st.session_state.admin_reset_verificado_ate = 0
+                                        st.rerun()
+
                     col_bloquear, col_excluir = st.columns(2)
 
                     with col_bloquear:
@@ -1223,6 +1308,39 @@ if not salvar_dados(usuario, dados):
 with st.sidebar:
     st.title("💬 Conversas")
     st.caption(f"Conta: {usuario}")
+
+    with st.expander("🔑 Trocar minha senha"):
+        with st.form("form_trocar_senha"):
+            senha_atual = st.text_input(
+                "Sua senha atual:", type="password", key="troca_senha_atual"
+            )
+            senha_nova = st.text_input(
+                "Sua nova senha:", type="password", key="troca_senha_nova"
+            )
+            confirmar_senha_nova = st.text_input(
+                "Confirme a nova senha:", type="password", key="troca_senha_confirma"
+            )
+            enviar_troca_senha = st.form_submit_button(
+                "Alterar senha", use_container_width=True
+            )
+
+        if enviar_troca_senha:
+            dados_senha = carregar_dados(usuario)
+            if not senha_atual or not senha_nova or not confirmar_senha_nova:
+                st.error("Preencha os três campos.")
+            elif not dados_senha or not verificar_senha(dados_senha, senha_atual):
+                st.error("Sua senha atual está incorreta.")
+            elif senha_nova != confirmar_senha_nova:
+                st.error("A nova senha e a confirmação não são iguais.")
+            elif senha_atual == senha_nova:
+                st.error("Escolha uma senha diferente da atual.")
+            else:
+                ok, mensagem = atualizar_senha_usuario(usuario, senha_nova)
+                (st.success if ok else st.error)(mensagem)
+                if ok:
+                    st.info("Por segurança, você será desconectado. Entre com a nova senha.")
+                    encerrar_sessao()
+                    st.rerun()
 
     if eh_admin(usuario):
         st.caption("🛡️ Conta administrativa")
