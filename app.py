@@ -1,4 +1,3 @@
-
 import json
 import hmac
 import hashlib
@@ -36,6 +35,12 @@ EMAIL_ADMIN = st.secrets.get(
     "OWNER_EMAIL",
     "davibezerranunes@gmail.com",
 )
+
+# Configure ADMIN_USERNAME nos Secrets com o nome exato da conta do ADM.
+# Se não estiver configurado, o sistema usa a parte anterior ao @ do OWNER_EMAIL.
+ADMIN_USERNAME = str(
+    st.secrets.get("ADMIN_USERNAME", EMAIL_ADMIN.split("@")[0])
+).strip().casefold()
 
 
 # =========================================================
@@ -264,6 +269,101 @@ def salvar_dados(usuario, dados):
         return False
 
 
+def eh_admin(usuario):
+    """Compara o usuário autenticado com o ADMIN_USERNAME configurado."""
+    return bool(usuario) and usuario.strip().casefold() == ADMIN_USERNAME
+
+
+def listar_usuarios():
+    """Retorna contas válidas sem expor hashes de senha ou tokens."""
+    usuarios = []
+
+    try:
+        arquivos = list(PASTA_DADOS.glob("*.json"))
+    except OSError:
+        return usuarios
+
+    for arquivo in arquivos:
+        try:
+            with arquivo.open("r", encoding="utf-8") as f:
+                bruto = json.load(f)
+
+            if not isinstance(bruto, dict):
+                continue
+
+            nome = bruto.get("usuario")
+            if not isinstance(nome, str) or not nome.strip():
+                continue
+
+            dados = carregar_dados(nome)
+            if not dados:
+                continue
+
+            chats = dados.get("chats", {})
+            total_chats = len(chats) if isinstance(chats, dict) else 0
+            total_mensagens = sum(
+                len(lista)
+                for lista in chats.values()
+                if isinstance(lista, list)
+            ) if isinstance(chats, dict) else 0
+
+            usuarios.append({
+                "usuario": nome,
+                "bloqueado": bool(bruto.get("bloqueado", False)),
+                "total_chats": total_chats,
+                "total_mensagens": total_mensagens,
+            })
+
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+    return sorted(usuarios, key=lambda item: item["usuario"].casefold())
+
+
+def alterar_bloqueio_usuario(nome_usuario, bloquear):
+    """Altera o estado de bloqueio sem retornar dados sensíveis."""
+    if not nome_usuario or eh_admin(nome_usuario):
+        return False, "A conta administrativa não pode ser bloqueada."
+
+    dados = carregar_dados(nome_usuario)
+    if not dados:
+        return False, "A conta selecionada não foi encontrada."
+
+    dados["bloqueado"] = bool(bloquear)
+    dados["bloqueado_em"] = int(time.time()) if bloquear else None
+
+    if not salvar_dados(nome_usuario, dados):
+        return False, "Não foi possível salvar a alteração."
+
+    if bloquear:
+        dados["token_hash"] = ""
+        if not salvar_dados(nome_usuario, dados):
+            return False, "Conta bloqueada, mas não foi possível revogar a sessão."
+
+    return True, (
+        "Conta bloqueada com sucesso."
+        if bloquear
+        else "Conta desbloqueada com sucesso."
+    )
+
+
+def excluir_usuario_admin(nome_usuario):
+    if not nome_usuario or eh_admin(nome_usuario):
+        return False, "A conta administrativa não pode ser excluída."
+
+    arquivo = caminho_usuario(nome_usuario)
+
+    try:
+        if not arquivo.exists():
+            return False, "A conta selecionada não foi encontrada."
+
+        arquivo.unlink()
+        return True, "Conta excluída com sucesso."
+
+    except OSError:
+        return False, "Não foi possível excluir a conta."
+
+
 # =========================================================
 # SENHAS E TOKENS
 # =========================================================
@@ -330,7 +430,7 @@ def validar_token(usuario, token):
 
     dados = carregar_dados(usuario)
 
-    if not dados:
+    if not dados or dados.get("bloqueado", False):
         return False
 
     token_salvo = dados.get("token_hash", "")
@@ -373,6 +473,7 @@ def criar_conta(usuario, senha):
         "salt": salt,
         "senha_hash": senha_hash,
         "token_hash": "",
+        "bloqueado": False,
         "chats": {"Conversa 1": []},
         "chat_atual": "Conversa 1",
     }
@@ -390,7 +491,7 @@ def criar_conta(usuario, senha):
 def gerar_sessao(usuario):
     dados = carregar_dados(usuario)
 
-    if not dados:
+    if not dados or dados.get("bloqueado", False):
         return False
 
     token = secrets.token_urlsafe(32)
@@ -427,11 +528,16 @@ def encerrar_sessao():
     st.session_state.usuario = ""
     st.session_state.confirmar_exclusao = False
     st.session_state.confirmar_exclusao_chat = False
+    st.session_state.painel_admin_autorizado = False
 
     return True
 
 
 def excluir_conta(usuario):
+    if eh_admin(usuario):
+        st.error("A conta administrativa não pode ser excluída por esta função.")
+        return
+
     arquivo = caminho_usuario(usuario)
 
     try:
@@ -562,13 +668,17 @@ def enviar_codigo_email(usuario_solicitante):
 
 
 def iniciar_verificacao(comando, usuario_solicitante):
+    # Somente a conta configurada como ADM pode solicitar acesso privilegiado.
+    if not eh_admin(usuario_solicitante):
+        st.error("Comando administrativo indisponível para esta conta.")
+        return
+
     try:
         enviar_codigo_email(usuario_solicitante)
 
         st.session_state.comando_pendente = comando
         st.session_state.aguardando_codigo = True
 
-        # Não mostra o endereço real do administrador no site.
         st.success(
             "Código enviado para o e-mail do ADM. "
             "Digite o código de 6 dígitos na próxima mensagem. "
@@ -665,6 +775,172 @@ def mostrar_requirements():
 
 
 # =========================================================
+# PAINEL DE ADM
+# =========================================================
+
+def mostrar_painel_admin(usuario_atual):
+    # Revalida a autorização em cada execução do painel.
+    if not eh_admin(usuario_atual):
+        st.error("Acesso negado.")
+        st.session_state.painel_admin_autorizado = False
+        return
+
+    st.title("🛡️ Painel de ADM")
+    st.caption("Área restrita — ações administrativas")
+
+    if st.button("Fechar painel e voltar ao chat", use_container_width=True):
+        st.session_state.painel_admin_autorizado = False
+        st.session_state.confirmar_exclusao_admin = ""
+        st.rerun()
+
+    usuarios = listar_usuarios()
+    total_usuarios = len(usuarios)
+    total_bloqueados = sum(1 for item in usuarios if item["bloqueado"])
+    total_conversas = sum(item["total_chats"] for item in usuarios)
+    total_mensagens = sum(item["total_mensagens"] for item in usuarios)
+
+    aba_estatisticas, aba_usuarios, aba_arquivos = st.tabs(
+        ["📊 Estatísticas", "👥 Usuários", "📄 Arquivos"]
+    )
+
+    with aba_estatisticas:
+        st.subheader("Visão geral do site")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.metric("Usuários cadastrados", total_usuarios)
+            st.metric("Conversas", total_conversas)
+
+        with col2:
+            st.metric("Contas bloqueadas", total_bloqueados)
+            st.metric("Mensagens salvas", total_mensagens)
+
+        st.caption(
+            "As estatísticas são calculadas a partir dos arquivos de contas "
+            "existentes no armazenamento atual."
+        )
+
+        if st.button("🔄 Atualizar estatísticas", use_container_width=True):
+            st.rerun()
+
+    with aba_usuarios:
+        st.subheader("Gerenciar usuários")
+
+        if not usuarios:
+            st.info("Nenhuma conta válida foi encontrada.")
+        else:
+            st.dataframe(
+                [
+                    {
+                        "Usuário": item["usuario"],
+                        "Status": "Bloqueado" if item["bloqueado"] else "Ativo",
+                        "Conversas": item["total_chats"],
+                        "Mensagens": item["total_mensagens"],
+                    }
+                    for item in usuarios
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            nomes = [item["usuario"] for item in usuarios]
+            selecionado = st.selectbox(
+                "Selecione uma conta",
+                nomes,
+                key="painel_usuario_selecionado",
+            )
+            item_selecionado = next(
+                (item for item in usuarios if item["usuario"] == selecionado),
+                None,
+            )
+
+            if item_selecionado:
+                if eh_admin(selecionado):
+                    st.info("Esta é a conta administrativa protegida.")
+                else:
+                    status = (
+                        "Bloqueada" if item_selecionado["bloqueado"]
+                        else "Ativa"
+                    )
+                    st.write(f"**Status atual:** {status}")
+                    col_bloquear, col_excluir = st.columns(2)
+
+                    with col_bloquear:
+                        if item_selecionado["bloqueado"]:
+                            if st.button(
+                                "🔓 Desbloquear conta",
+                                use_container_width=True,
+                            ):
+                                ok, msg = alterar_bloqueio_usuario(
+                                    selecionado, False
+                                )
+                                (st.success if ok else st.error)(msg)
+                                if ok:
+                                    st.rerun()
+                        else:
+                            if st.button(
+                                "🔒 Bloquear conta",
+                                use_container_width=True,
+                            ):
+                                ok, msg = alterar_bloqueio_usuario(
+                                    selecionado, True
+                                )
+                                (st.success if ok else st.error)(msg)
+                                if ok:
+                                    st.rerun()
+
+                    with col_excluir:
+                        if st.button(
+                            "🗑️ Excluir conta",
+                            use_container_width=True,
+                        ):
+                            st.session_state.confirmar_exclusao_admin = selecionado
+
+                    if (
+                        st.session_state.get("confirmar_exclusao_admin")
+                        == selecionado
+                    ):
+                        st.warning(
+                            f"Excluir permanentemente a conta '{selecionado}' "
+                            "e o histórico dela? Essa ação não pode ser desfeita."
+                        )
+                        col_sim, col_nao = st.columns(2)
+
+                        with col_sim:
+                            if st.button(
+                                "SIM, EXCLUIR",
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                ok, msg = excluir_usuario_admin(selecionado)
+                                (st.success if ok else st.error)(msg)
+                                st.session_state.confirmar_exclusao_admin = ""
+                                if ok:
+                                    st.rerun()
+
+                        with col_nao:
+                            if st.button(
+                                "Cancelar",
+                                use_container_width=True,
+                            ):
+                                st.session_state.confirmar_exclusao_admin = ""
+                                st.rerun()
+
+        st.caption(
+            "O painel não exibe senhas, hashes de senha ou tokens de sessão."
+        )
+
+    with aba_arquivos:
+        st.subheader("Arquivos do projeto")
+
+        if st.button("📄 Consultar app.py", use_container_width=True):
+            mostrar_codigo_fonte()
+
+        if st.button("📦 Consultar requirements.txt", use_container_width=True):
+            mostrar_requirements()
+
+
+# =========================================================
 # RESTAURAR ESTADO
 # =========================================================
 
@@ -701,6 +977,12 @@ if "codigo_admin_tentativas" not in st.session_state:
 if "resposta_modo_admin" not in st.session_state:
     st.session_state.resposta_modo_admin = False
 
+if "painel_admin_autorizado" not in st.session_state:
+    st.session_state.painel_admin_autorizado = False
+
+if "confirmar_exclusao_admin" not in st.session_state:
+    st.session_state.confirmar_exclusao_admin = ""
+
 
 # =========================================================
 # CABEÇALHO
@@ -733,7 +1015,11 @@ if not st.session_state.usuario:
             usuario_digitado = login_usuario.strip()
             dados_login = carregar_dados(usuario_digitado)
 
-            if dados_login and verificar_senha(dados_login, login_senha):
+            if (
+                dados_login
+                and not dados_login.get("bloqueado", False)
+                and verificar_senha(dados_login, login_senha)
+            ):
                 nome_autenticado = (
                     dados_login.get("usuario") or usuario_digitado
                 )
@@ -742,6 +1028,8 @@ if not st.session_state.usuario:
                     st.rerun()
                 else:
                     st.error("Não foi possível salvar os dados da sessão.")
+            elif dados_login and dados_login.get("bloqueado", False):
+                st.error("Esta conta está bloqueada. Entre em contato com o ADM.")
             else:
                 st.error("Usuário ou senha incorretos.")
 
@@ -802,6 +1090,11 @@ if dados is None:
 
     st.stop()
 
+if dados.get("bloqueado", False) and not eh_admin(usuario):
+    encerrar_sessao()
+    st.error("Esta conta foi bloqueada pelo ADM.")
+    st.stop()
+
 dados["usuario"] = dados.get("usuario") or usuario
 
 if not salvar_dados(usuario, dados):
@@ -815,6 +1108,9 @@ if not salvar_dados(usuario, dados):
 with st.sidebar:
     st.title("💬 Conversas")
     st.caption(f"Conta: {usuario}")
+
+    if eh_admin(usuario):
+        st.caption("🛡️ Conta administrativa")
 
     if st.button("➕ Nova conversa", use_container_width=True):
         numero = 1
@@ -901,24 +1197,40 @@ with st.sidebar:
         st.session_state.confirmar_exclusao = True
 
     if st.session_state.confirmar_exclusao:
-        st.warning(
-            "Isso apagará a conta e todo o histórico "
-            "deste armazenamento."
-        )
-
-        if st.button(
-            "SIM, EXCLUIR CONTA",
-            use_container_width=True,
-            type="primary",
-        ):
-            excluir_conta(usuario)
-
-        if st.button(
-            "Cancelar exclusão da conta",
-            use_container_width=True,
-        ):
+        if eh_admin(usuario):
+            st.warning("A conta administrativa está protegida contra exclusão.")
             st.session_state.confirmar_exclusao = False
-            st.rerun()
+        else:
+            st.warning(
+                "Isso apagará a conta e todo o histórico "
+                "deste armazenamento."
+            )
+
+            if st.button(
+                "SIM, EXCLUIR CONTA",
+                use_container_width=True,
+                type="primary",
+            ):
+                excluir_conta(usuario)
+
+            if st.button(
+                "Cancelar exclusão da conta",
+                use_container_width=True,
+            ):
+                st.session_state.confirmar_exclusao = False
+                st.rerun()
+
+
+# =========================================================
+# MOSTRAR PAINEL AUTORIZADO
+# =========================================================
+
+if st.session_state.get("painel_admin_autorizado", False):
+    if eh_admin(usuario):
+        mostrar_painel_admin(usuario)
+        st.stop()
+    else:
+        st.session_state.painel_admin_autorizado = False
 
 
 # =========================================================
@@ -962,10 +1274,18 @@ if pergunta:
             comando = st.session_state.comando_pendente
             st.session_state.comando_pendente = None
 
+            if not eh_admin(usuario):
+                cancelar_verificacao()
+                st.error("Acesso administrativo negado.")
+                st.stop()
+
             if comando == "20456742":
                 mostrar_codigo_fonte()
             elif comando == "20456742v2":
                 mostrar_requirements()
+            elif comando == "paineladm":
+                st.session_state.painel_admin_autorizado = True
+                st.rerun()
 
             st.stop()
 
@@ -975,15 +1295,15 @@ if pergunta:
         st.rerun()
 
     # -----------------------------------------------------
-    # COMANDOS EXATOS COM VERIFICAÇÃO
+    # COMANDOS ADMINISTRATIVOS COM VERIFICAÇÃO
     # -----------------------------------------------------
 
-    if texto == "20456742":
-        iniciar_verificacao("20456742", usuario)
-        st.stop()
+    if texto in ("20456742", "20456742v2", "paineladm"):
+        if not eh_admin(usuario):
+            st.error("Comando administrativo indisponível para esta conta.")
+            st.stop()
 
-    if texto == "20456742v2":
-        iniciar_verificacao("20456742v2", usuario)
+        iniciar_verificacao(texto, usuario)
         st.stop()
 
     # -----------------------------------------------------
