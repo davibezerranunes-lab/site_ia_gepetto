@@ -1,4 +1,7 @@
-streamlit
-groq
-streamlit-cookies-manager-v2==0.3.1
+streamlit>=1.44.0
+groq>=0.31.0
+streamlit-cookies-manager>=0.2.0
 Authlib>=1.3.2
+pypdf>=5.0.0
+python-docx>=1.1.2
+openpyxl>=3.1.5
