@@ -2213,7 +2213,7 @@ with st.sidebar:
     st.title("💬 Conversas")
     st.caption(f"Conta: {usuario}")
 
-    if st.button("➕ Nova conversa", use_container_width=True):
+    if st.button("Nova conversa", use_container_width=True):
         numero = 1
         nome = f"Conversa {numero}"
 
