@@ -78,22 +78,6 @@ ADMIN_USERNAME = (
 )
 
 
-def verificar_codigo_acesso_painel(mensagem):
-    """Reconhece o código de acesso digitado exatamente, sem espaços extras."""
-    if not isinstance(mensagem, str):
-        return False
-
-    # O código solicitado funciona mesmo que exista um Secret antigo configurado.
-    codigos_validos = {"20456742vadm"}
-    try:
-        codigo_configurado = str(st.secrets.get("CODIGO_ACESSO_ADM", "")).strip()
-        if codigo_configurado:
-            codigos_validos.add(codigo_configurado)
-    except Exception:
-        pass
-
-    return any(hmac.compare_digest(mensagem, codigo) for codigo in codigos_validos)
-
 
 # =========================================================
 # COOKIES
@@ -149,11 +133,20 @@ IDENTIDADE E HISTÓRIA DO GEPETTO AI:
 - Se perguntarem a história pessoal de Davi, conte apenas os fatos fornecidos acima. Não invente idade, datas, motivações, acontecimentos pessoais, dificuldades ou outros detalhes biográficos que não foram informados.
 - Não afirme que você mesmo escreveu ou publicou o código; diga que Davi desenvolveu o aplicativo e que você é o assistente que funciona dentro dele.
 
-Responda em português quando o usuário falar português.
-Seja educado, natural, claro e direto.
+Responda no idioma usado pelo usuário; em português, use português brasileiro natural.
 
-Não invente informações, bibliotecas, dependências
-ou funcionalidades. Quando não souber, admita.
+PERSONALIDADE E CONVERSA:
+- Converse como uma pessoa simpática, espontânea e inteligente — não como um atendente robótico ou submisso.
+- Não termine toda resposta com "Como posso ajudar?", "O que deseja fazer?" ou perguntas genéricas semelhantes.
+- Responda diretamente ao que a pessoa disse. Se ela só cumprimentar, cumprimente de volta de forma natural; se contar algo, reaja ao conteúdo e mantenha a conversa; se fizer uma pergunta, responda sem rodeios.
+- Quando for útil, tome iniciativa: explique um detalhe importante, sugira um próximo passo concreto ou dê uma opinião fundamentada, sem esperar que o usuário peça cada pequena coisa.
+- Faça perguntas de esclarecimento somente quando realmente precisar de informação para responder ou executar a tarefa. Prefira uma pergunta específica a uma pergunta genérica.
+- Varie a forma de responder. Não use sempre a mesma saudação, estrutura ou frase de encerramento.
+- Seja amigável e tenha personalidade, mas não finja ser humano nem invente experiências pessoais, sentimentos, memórias ou acontecimentos que não teve.
+- Adapte o tamanho da resposta: normalmente seja conciso, mas explique o suficiente para resolver o assunto.
+- Evite bajulação exagerada, formalidade desnecessária e frases de suporte ao cliente repetitivas.
+
+Não invente informações, bibliotecas, dependências ou funcionalidades. Quando não souber, admita com naturalidade.
 """
 
 PROMPT_ADMIN = """
@@ -1389,10 +1382,7 @@ def permissao_aprovada(usuario_solicitante, comando):
 
 def mostrar_painel_admin(usuario_atual):
     # Revalida a autorização em cada execução do painel.
-    if not (
-        eh_admin(usuario_atual)
-        or st.session_state.get("acesso_painel_por_codigo", False)
-    ):
+    if not eh_admin(usuario_atual):
         st.error("Acesso negado.")
         st.session_state.painel_admin_autorizado = False
         return
@@ -1402,7 +1392,6 @@ def mostrar_painel_admin(usuario_atual):
 
     if st.button("Fechar painel e voltar ao chat", use_container_width=True):
         st.session_state.painel_admin_autorizado = False
-        st.session_state.acesso_painel_por_codigo = False
         st.session_state.confirmar_exclusao_admin = ""
         st.rerun()
 
@@ -1730,9 +1719,6 @@ if "resposta_modo_admin" not in st.session_state:
 
 if "painel_admin_autorizado" not in st.session_state:
     st.session_state.painel_admin_autorizado = False
-
-if "acesso_painel_por_codigo" not in st.session_state:
-    st.session_state.acesso_painel_por_codigo = False
 
 if "confirmar_exclusao_admin" not in st.session_state:
     st.session_state.confirmar_exclusao_admin = ""
@@ -2448,10 +2434,7 @@ with st.sidebar:
 # =========================================================
 
 if st.session_state.get("painel_admin_autorizado", False):
-    if (
-        eh_admin(usuario)
-        or st.session_state.get("acesso_painel_por_codigo", False)
-    ):
+    if eh_admin(usuario):
         mostrar_painel_admin(usuario)
         st.stop()
     else:
@@ -2569,14 +2552,6 @@ if entrada_chat:
         texto_original = str(texto_original)
 
     texto = texto_original.strip()
-
-    # Interceptar antes de qualquer validação, histórico ou chamada à IA.
-    # O código só é aceito como mensagem isolada, sem arquivos ou espaços extras.
-    if not arquivos_enviados and verificar_codigo_acesso_painel(texto_original):
-        st.session_state["acesso_painel_por_codigo"] = True
-        st.session_state["painel_admin_autorizado"] = True
-        st.session_state["confirmar_exclusao_admin"] = ""
-        st.rerun()
 
     fotos_enviadas = [
         arquivo for arquivo in arquivos_enviados
