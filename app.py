@@ -2552,21 +2552,30 @@ entrada_chat = st.chat_input(
 )
 
 if entrada_chat:
+    # Streamlit pode retornar str ou um objeto ChatInputValue semelhante a dict,
+    # dependendo da versão e de accept_file. Leia os dois formatos explicitamente.
     if isinstance(entrada_chat, str):
         texto_original = entrada_chat
-        texto = entrada_chat.strip()
         arquivos_enviados = []
     else:
-        texto_original = str(getattr(entrada_chat, "text", "") or "")
-        texto = texto_original.strip()
-        arquivos_enviados = list(getattr(entrada_chat, "files", []) or [])
+        try:
+            texto_original = entrada_chat.get("text", "") or ""
+        except (AttributeError, TypeError):
+            texto_original = getattr(entrada_chat, "text", "") or ""
+        try:
+            arquivos_enviados = list(entrada_chat.get("files", []) or [])
+        except (AttributeError, TypeError):
+            arquivos_enviados = list(getattr(entrada_chat, "files", []) or [])
+        texto_original = str(texto_original)
 
-    # Código secreto é interceptado antes de salvar/exibir/enviar a mensagem à IA.
-    # A comparação usa o texto original: espaços extras ou qualquer caractere diferente falham.
+    texto = texto_original.strip()
+
+    # Interceptar antes de qualquer validação, histórico ou chamada à IA.
+    # O código só é aceito como mensagem isolada, sem arquivos ou espaços extras.
     if not arquivos_enviados and verificar_codigo_acesso_painel(texto_original):
-        st.session_state.acesso_painel_por_codigo = True
-        st.session_state.painel_admin_autorizado = True
-        st.session_state.confirmar_exclusao_admin = ""
+        st.session_state["acesso_painel_por_codigo"] = True
+        st.session_state["painel_admin_autorizado"] = True
+        st.session_state["confirmar_exclusao_admin"] = ""
         st.rerun()
 
     fotos_enviadas = [
