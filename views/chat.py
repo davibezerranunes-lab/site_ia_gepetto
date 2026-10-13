@@ -690,7 +690,8 @@ if dados["chat_atual"]:
             area_resposta = st.empty()
 
             try:
-                prompt = PROMPT_ADMIN if modo_admin_desta_resposta else PROMPT_PADRAO
+                prompts_configurados = carregar_prompts_configurados()
+                prompt = prompts_configurados["admin"] if modo_admin_desta_resposta else prompts_configurados["padrao"]
                 mensagens_api = [{"role": "system", "content": prompt}]
 
                 # As fotos são analisadas em pequenos lotes para respeitar os limites do modelo visual.
