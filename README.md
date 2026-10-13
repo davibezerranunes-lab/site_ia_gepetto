@@ -1,18 +1,27 @@
-# Gepetto AI — versão multipáginas
+# Gepetto AI
 
-## Estrutura
+Aplicação Streamlit multipáginas.
 
-- `app.py`: entrada principal do Streamlit; monta a navegação com `st.navigation` e `st.Page`.
-- `gepetto_core.py`: funções compartilhadas, autenticação, sessão, uploads, persistência e painel administrativo.
-- `views/login.py`: login, cadastro, recuperação de senha e fluxo Google.
-- `views/chat.py`: conversas, histórico, anexos, streaming e exportação.
-- `views/admin.py`: painel administrativo com verificação de autorização no servidor.
+## Rotas
 
-## Publicação no Streamlit Community Cloud
+- `/` — rota inicial, encaminha para login ou conversas conforme a sessão.
+- `/login` — entrar e criar conta.
+- `/chat` — conversas (requer login).
+- `/adm` — painel administrativo (requer login de administrador).
 
-1. Extraia o ZIP e envie todos os arquivos e pastas para o repositório GitHub usado pelo app.
-2. Configure o app para executar `app.py` como arquivo principal.
-3. Preserve os Secrets já configurados no Streamlit Cloud. Em especial, não remova nem compartilhe `GROQ_API_KEY`, `COOKIE_PASSWORD` e as credenciais de e-mail/OAuth já utilizadas pelo app.
-4. O Streamlit instalará as dependências listadas em `requirements.txt` na próxima implantação.
+Todas as rotas são registradas em `app.py` em cada execução. Cada página restaura
+os cookies e verifica as permissões antes de exibir dados. A página de ADM pode
+estar oculta no menu para usuários comuns, mas sua URL continua registrada para
+que o Streamlit consiga resolver a rota; o próprio módulo `views/admin.py`
+nega acesso a quem não é administrador.
 
-O ZIP não inclui dados de usuários, tokens, arquivos enviados nem um arquivo local de Secrets.
+## Executar localmente
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Configure os Secrets `GROQ_API_KEY` e `COOKIE_PASSWORD` e, opcionalmente,
+`ADMIN_USERNAMES` / `ADMIN_USERNAME` e os Secrets do OAuth Google. Não envie
+Secrets nem dados privados junto com o código-fonte.
