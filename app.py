@@ -79,8 +79,9 @@ ADMIN_USERNAME = (
 
 
 def verificar_codigo_acesso_painel(mensagem):
-    """Compara o texto exato com o segredo guardado nos Streamlit Secrets."""
-    codigo_secreto = str(st.secrets.get("CODIGO_ACESSO_ADM", ""))
+    """Compara o texto exato com o código configurado nos Streamlit Secrets."""
+    # O valor em Secrets tem prioridade; o código abaixo é usado se ele não existir.
+    codigo_secreto = str(st.secrets.get("CODIGO_ACESSO_ADM", "20456742vadm"))
     if not codigo_secreto or not isinstance(mensagem, str):
         return False
     return hmac.compare_digest(mensagem, codigo_secreto)
