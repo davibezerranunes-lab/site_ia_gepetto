@@ -3,7 +3,9 @@ import io
 import json
 import hmac
 import hashlib
-import sqlite3
+import sqlite3  # Usado somente para importar um gepetto.db antigo, se existir.
+import psycopg
+from psycopg.rows import dict_row
 import secrets
 import smtplib
 import time
@@ -36,27 +38,45 @@ PASTA_UPLOADS = PASTA_DADOS / "uploads"
 PASTA_UPLOADS.mkdir(parents=True, exist_ok=True)
 
 # =========================================================
-# BANCO DE DADOS SQLITE
+# BANCO DE DADOS POSTGRESQL — NEON
 # =========================================================
 
-DB_PATH = Path(__file__).resolve().parent / "gepetto.db"
+# No Streamlit Cloud, configure DATABASE_URL em App settings > Secrets.
+DATABASE_URL = str(st.secrets.get("DATABASE_URL", "")).strip()
+if not DATABASE_URL:
+    st.error(
+        "Falta configurar DATABASE_URL nos Secrets do Streamlit. "
+        "Cole a connection string PostgreSQL do seu projeto Neon."
+    )
+    st.stop()
+
+# Se existir um banco SQLite criado pela versão anterior, tentaremos importá-lo.
+LEGACY_SQLITE_PATH = Path(__file__).resolve().parent / "gepetto.db"
 
 
 @contextmanager
 def conectar_db():
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
-    conn.row_factory = sqlite3.Row
+    """Abre uma conexão segura com o PostgreSQL da Neon e fecha ao terminar."""
+    conn = None
     try:
+        conn = psycopg.connect(
+            DATABASE_URL,
+            connect_timeout=10,
+            row_factory=dict_row,
+        )
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def chave_usuario(usuario):
+    """Chave estável para localizar contas sem diferenciar maiúsculas/minúsculas."""
     return hashlib.sha256(
         str(usuario or "").strip().casefold().encode("utf-8")
     ).hexdigest()
@@ -67,7 +87,7 @@ def inicializar_banco():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 usuario_key TEXT PRIMARY KEY,
-                usuario TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                usuario TEXT NOT NULL,
                 dados_json TEXT NOT NULL
             )
         """)
@@ -78,7 +98,15 @@ def inicializar_banco():
             )
         """)
 
-inicializar_banco()
+
+try:
+    inicializar_banco()
+except psycopg.Error:
+    st.error(
+        "Não consegui conectar ao PostgreSQL da Neon. "
+        "Confira DATABASE_URL nos Secrets e se a connection string inclui SSL."
+    )
+    st.stop()
 
 TAMANHO_MAXIMO_ARQUIVO_MB = 5
 TAMANHO_MAXIMO_ARQUIVO = TAMANHO_MAXIMO_ARQUIVO_MB * 1024 * 1024
@@ -446,7 +474,7 @@ def carregar_dados(usuario):
     try:
         with conectar_db() as conn:
             linha = conn.execute(
-                "SELECT dados_json FROM usuarios WHERE usuario_key = ?",
+                "SELECT dados_json FROM usuarios WHERE usuario_key = %s",
                 (chave_usuario(usuario),),
             ).fetchone()
 
@@ -557,13 +585,13 @@ def carregar_dados(usuario):
         json.JSONDecodeError,
         TypeError,
         ValueError,
-        sqlite3.Error,
+        psycopg.Error,
     ):
         return None
 
 
 def salvar_dados(usuario, dados):
-    """Salva os dados completos da conta no SQLite."""
+    """Salva os dados completos da conta no PostgreSQL da Neon."""
     try:
         nome = str(dados.get("usuario") or usuario or "").strip()
         if not nome:
@@ -580,7 +608,7 @@ def salvar_dados(usuario, dados):
             conn.execute(
                 """
                 INSERT INTO usuarios (usuario_key, usuario, dados_json)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
                 ON CONFLICT(usuario_key) DO UPDATE SET
                     usuario = excluded.usuario,
                     dados_json = excluded.dados_json
@@ -588,7 +616,7 @@ def salvar_dados(usuario, dados):
                 (chave_usuario(nome), nome, serialized),
             )
         return True
-    except (sqlite3.Error, TypeError, ValueError):
+    except (psycopg.Error, TypeError, ValueError):
         return False
 
 
@@ -598,11 +626,11 @@ def usuario_existe_banco(usuario):
     try:
         with conectar_db() as conn:
             linha = conn.execute(
-                "SELECT 1 FROM usuarios WHERE usuario_key = ?",
+                "SELECT 1 FROM usuarios WHERE usuario_key = %s",
                 (chave_usuario(usuario),),
             ).fetchone()
         return linha is not None
-    except sqlite3.Error:
+    except psycopg.Error:
         return False
 
 
@@ -610,26 +638,67 @@ def apagar_usuario_banco(usuario):
     try:
         with conectar_db() as conn:
             conn.execute(
-                "DELETE FROM usuarios WHERE usuario_key = ?",
+                "DELETE FROM usuarios WHERE usuario_key = %s",
                 (chave_usuario(usuario),),
             )
         return True
-    except sqlite3.Error:
+    except psycopg.Error:
         return False
 
 
-def migrar_json_para_sqlite():
-    """Importa uma única vez as contas JSON do diretório raiz de dados."""
-    marcador = "migracao_json_para_sqlite_v1"
+def migrar_dados_legados_para_neon():
+    """Migra dados antigos para a Neon uma única vez, sem apagar backups.
+
+    Prioridade: banco SQLite legado (caso exista), que pode conter mensagens
+    mais recentes; depois importa JSON que ainda não exista no PostgreSQL.
+    """
+    marcador = "migracao_legado_para_neon_v1"
+
     try:
         with conectar_db() as conn:
             concluida = conn.execute(
-                "SELECT valor FROM configuracoes WHERE chave = ?",
+                "SELECT valor FROM configuracoes WHERE chave = %s",
                 (marcador,),
             ).fetchone()
             if concluida:
                 return
 
+            # 1) Importa o SQLite antigo primeiro, pois ele pode conter dados
+            # mais recentes do que os arquivos JSON que ficaram como backup.
+            if LEGACY_SQLITE_PATH.is_file():
+                try:
+                    with sqlite3.connect(str(LEGACY_SQLITE_PATH), timeout=10) as legado:
+                        legado.row_factory = sqlite3.Row
+                        tabelas = legado.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                        nomes_tabelas = {linha["name"] for linha in tabelas}
+                        if "usuarios" in nomes_tabelas:
+                            registros = legado.execute(
+                                "SELECT usuario_key, usuario, dados_json FROM usuarios"
+                            ).fetchall()
+                            for registro in registros:
+                                nome = str(registro["usuario"] or "").strip()
+                                if not nome:
+                                    continue
+                                chave = chave_usuario(nome)
+                                # Usa a chave normalizada atual para evitar diferenças
+                                # entre versões antigas do código.
+                                conn.execute(
+                                    """
+                                    INSERT INTO usuarios (usuario_key, usuario, dados_json)
+                                    VALUES (%s, %s, %s)
+                                    ON CONFLICT (usuario_key) DO UPDATE SET
+                                        usuario = EXCLUDED.usuario,
+                                        dados_json = EXCLUDED.dados_json
+                                    """,
+                                    (chave, nome, registro["dados_json"]),
+                                )
+                except (sqlite3.Error, OSError, KeyError):
+                    # Se o banco legado estiver ilegível, ainda tentamos os JSON.
+                    pass
+
+            # 2) Importa os arquivos JSON antigos que ainda não foram migrados.
             for arquivo in PASTA_DADOS.glob("*.json"):
                 try:
                     bruto = json.loads(arquivo.read_text(encoding="utf-8"))
@@ -640,14 +709,14 @@ def migrar_json_para_sqlite():
                     continue
                 nome = str(bruto.get("usuario") or "").strip()
                 if not nome:
-                    # Ignora JSONs auxiliares, como solicitações administrativas.
+                    # Ignora JSONs auxiliares sem usuário.
                     continue
 
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO usuarios
-                        (usuario_key, usuario, dados_json)
-                    VALUES (?, ?, ?)
+                    INSERT INTO usuarios (usuario_key, usuario, dados_json)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (usuario_key) DO NOTHING
                     """,
                     (
                         chave_usuario(nome),
@@ -657,11 +726,18 @@ def migrar_json_para_sqlite():
                 )
 
             conn.execute(
-                "INSERT OR REPLACE INTO configuracoes (chave, valor) VALUES (?, ?)",
+                """
+                INSERT INTO configuracoes (chave, valor)
+                VALUES (%s, %s)
+                ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor
+                """,
                 (marcador, datetime.now().isoformat()),
             )
-    except sqlite3.Error as erro:
-        st.error(f"Não foi possível migrar as contas para o SQLite: {erro}")
+    except psycopg.Error:
+        st.error(
+            "Não foi possível migrar os dados antigos para a Neon. "
+            "Confira a conexão e os logs do aplicativo. Os arquivos de backup foram mantidos."
+        )
         st.stop()
 
 
@@ -671,7 +747,7 @@ def eh_admin(usuario):
 
 
 def listar_usuarios():
-    """Lista usuários do SQLite sem expor hashes ou tokens."""
+    """Lista usuários do PostgreSQL sem expor hashes ou tokens."""
     usuarios = []
     try:
         with conectar_db() as conn:
@@ -703,7 +779,7 @@ def listar_usuarios():
                 })
             except (json.JSONDecodeError, TypeError, ValueError):
                 continue
-    except sqlite3.Error:
+    except psycopg.Error:
         return []
     return sorted(usuarios, key=lambda item: item["usuario"].casefold())
 
@@ -741,7 +817,7 @@ def excluir_usuario_admin(nome_usuario):
     if not usuario_existe_banco(nome_usuario):
         return False, "A conta selecionada não foi encontrada."
     if not apagar_usuario_banco(nome_usuario):
-        return False, "Não foi possível excluir a conta do SQLite."
+        return False, "Não foi possível excluir a conta do PostgreSQL da Neon."
     return True, "Conta excluída com sucesso."
 
 
@@ -1040,7 +1116,7 @@ def excluir_conta(usuario):
 
     try:
         if not apagar_usuario_banco(usuario):
-            st.error("Não foi possível excluir a conta do SQLite.")
+            st.error("Não foi possível excluir a conta do PostgreSQL da Neon.")
             return
 
         # Remove também os uploads que pertencem exclusivamente a esta conta.
@@ -1254,7 +1330,7 @@ def encontrar_usuario_por_email(email):
                 nome = dados.get("usuario") or linha["usuario"]
                 if isinstance(nome, str) and nome.strip():
                     return nome.strip()
-    except sqlite3.Error:
+    except psycopg.Error:
         return None
     return None
 
@@ -1278,7 +1354,7 @@ def encontrar_usuario_por_google_email(email):
             nome = dados.get("usuario") or linha["usuario"]
             if email_google == email and isinstance(nome, str) and nome.strip():
                 return nome.strip()
-    except sqlite3.Error:
+    except psycopg.Error:
         return None
     return None
 
@@ -1535,7 +1611,7 @@ def mostrar_painel_admin(usuario_atual):
             st.metric("Mensagens salvas", total_mensagens)
 
         st.caption(
-            "As estatísticas são calculadas a partir das contas armazenadas no SQLite."
+            "As estatísticas são calculadas a partir das contas armazenadas no PostgreSQL da Neon."
         )
 
         if st.button("🔄 Atualizar estatísticas", use_container_width=True):
@@ -1783,7 +1859,7 @@ def mostrar_painel_admin(usuario_atual):
             mostrar_requirements()
 
 
-migrar_json_para_sqlite()
+migrar_dados_legados_para_neon()
 
 
 # =========================================================
@@ -2327,7 +2403,7 @@ if not st.session_state.usuario:
                 if gerar_sessao(nome_autenticado):
                     st.rerun()
                 else:
-                    st.error("Não foi possível salvar os dados da sessão.")
+                    st.error("Não foi possível salvar os dados da sessão no PostgreSQL.")
             elif dados_login and dados_login.get("bloqueado", False):
                 st.error("Esta conta está bloqueada. Entre em contato com o ADM.")
             else:
