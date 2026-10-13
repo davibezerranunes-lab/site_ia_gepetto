@@ -165,6 +165,38 @@ def inicializar_runtime():
 
 
 # =========================================================
+# PROMPTS CONFIGURÁVEIS PELO PAINEL ADMINISTRATIVO
+# =========================================================
+ARQUIVO_PROMPTS = PASTA_DADOS / "prompts_ia.json"
+
+
+def carregar_prompts_configurados():
+    """Carrega prompts editados pelo ADM; usa os padrões se ainda não houver arquivo."""
+    resultado = {"padrao": PROMPT_PADRAO, "admin": PROMPT_ADMIN}
+    try:
+        if ARQUIVO_PROMPTS.exists():
+            dados = json.loads(ARQUIVO_PROMPTS.read_text(encoding="utf-8"))
+            if isinstance(dados, dict):
+                for chave in resultado:
+                    if isinstance(dados.get(chave), str) and dados[chave].strip():
+                        resultado[chave] = dados[chave]
+    except (OSError, ValueError, TypeError):
+        pass
+    return resultado
+
+
+def salvar_prompts_configurados(prompt_padrao, prompt_admin):
+    """Salva prompts em arquivo persistente no armazenamento do aplicativo."""
+    try:
+        ARQUIVO_PROMPTS.write_text(
+            json.dumps({"padrao": prompt_padrao, "admin": prompt_admin}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except OSError:
+        return False
+
+# =========================================================
 # PROMPTS
 # =========================================================
 
@@ -1459,8 +1491,8 @@ def mostrar_painel_admin(usuario_atual):
     total_conversas = sum(item["total_chats"] for item in usuarios)
     total_mensagens = sum(item["total_mensagens"] for item in usuarios)
 
-    aba_estatisticas, aba_usuarios, aba_solicitacoes, aba_arquivos = st.tabs(
-        ["📊 Estatísticas", "👥 Usuários", "🔔 Solicitações", "📄 Arquivos"]
+    aba_estatisticas, aba_usuarios, aba_solicitacoes, aba_arquivos, aba_prompts = st.tabs(
+        ["📊 Estatísticas", "👥 Usuários", "🔔 Solicitações", "📄 Arquivos", "🧠 Prompts da IA"]
     )
 
     with aba_estatisticas:
@@ -1723,6 +1755,30 @@ def mostrar_painel_admin(usuario_atual):
 
         if st.button("📦 Consultar requirements.txt", use_container_width=True):
             mostrar_requirements()
+
+    with aba_prompts:
+        st.subheader("🧠 Controlar os prompts da IA")
+        st.caption("Edite as instruções que orientam as respostas. As alterações ficam em dados_usuarios/prompts_ia.json.")
+        prompts_atuais = carregar_prompts_configurados()
+        with st.form("form_editar_prompts_ia"):
+            prompt_padrao_editado = st.text_area("Prompt padrão (todos os usuários)", value=prompts_atuais["padrao"], height=320, key="editor_prompt_padrao")
+            prompt_admin_editado = st.text_area("Prompt administrativo", value=prompts_atuais["admin"], height=220, key="editor_prompt_admin")
+            salvar_prompts = st.form_submit_button("💾 Salvar prompts", use_container_width=True)
+        if salvar_prompts:
+            if not prompt_padrao_editado.strip() or not prompt_admin_editado.strip():
+                st.error("Os dois prompts precisam conter texto.")
+            elif salvar_prompts_configurados(prompt_padrao_editado, prompt_admin_editado):
+                st.success("Prompts salvos. As próximas respostas usarão as alterações.")
+                st.rerun(scope="fragment")
+            else:
+                st.error("Não foi possível salvar. Verifique se o armazenamento permite escrita.")
+        if st.button("↩️ Restaurar prompts originais", use_container_width=True):
+            try:
+                ARQUIVO_PROMPTS.unlink(missing_ok=True)
+                st.success("Os prompts originais serão usados novamente.")
+                st.rerun(scope="fragment")
+            except OSError:
+                st.error("Não foi possível remover o arquivo de configuração.")
 
 
 # =========================================================
