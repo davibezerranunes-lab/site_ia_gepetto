@@ -33,14 +33,6 @@ PASTA_DADOS.mkdir(parents=True, exist_ok=True)
 PASTA_UPLOADS = PASTA_DADOS / "uploads"
 PASTA_UPLOADS.mkdir(parents=True, exist_ok=True)
 
-# Restringe permissões em sistemas POSIX; no Windows/hosts gerenciados,
-# as permissões efetivas continuam dependendo do sistema operacional.
-try:
-    PASTA_DADOS.chmod(0o700)
-    PASTA_UPLOADS.chmod(0o700)
-except OSError:
-    pass
-
 TAMANHO_MAXIMO_ARQUIVO_MB = 5
 TAMANHO_MAXIMO_ARQUIVO = TAMANHO_MAXIMO_ARQUIVO_MB * 1024 * 1024
 MAX_FOTOS_POR_DIA = 15
@@ -84,6 +76,14 @@ ADMIN_USERNAME = (
     if _admin_names_normalized
     else EMAIL_ADMIN.split("@")[0].strip().casefold()
 )
+
+
+def verificar_codigo_acesso_painel(mensagem):
+    """Compara o texto exato com o segredo guardado nos Streamlit Secrets."""
+    codigo_secreto = str(st.secrets.get("CODIGO_ACESSO_ADM", ""))
+    if not codigo_secreto or not isinstance(mensagem, str):
+        return False
+    return hmac.compare_digest(mensagem, codigo_secreto)
 
 
 # =========================================================
@@ -519,15 +519,7 @@ def salvar_dados(usuario, dados):
                 indent=2,
             )
 
-        try:
-            temporario.chmod(0o600)
-        except OSError:
-            pass
         temporario.replace(arquivo)
-        try:
-            arquivo.chmod(0o600)
-        except OSError:
-            pass
         return True
 
     except OSError:
@@ -1134,6 +1126,8 @@ def encontrar_usuario_por_email(email):
     if not email:
         return None
     for arquivo in PASTA_DADOS.glob("*.json"):
+        if arquivo.name == ARQUIVO_SOLICITACOES.name:
+            continue
         try:
             bruto = json.loads(arquivo.read_text(encoding="utf-8"))
             if not isinstance(bruto, dict):
@@ -1155,6 +1149,8 @@ def encontrar_usuario_por_google_email(email):
     if not email:
         return None
     for arquivo in PASTA_DADOS.glob("*.json"):
+        if arquivo.name == ARQUIVO_SOLICITACOES.name:
+            continue
         try:
             bruto = json.loads(arquivo.read_text(encoding="utf-8"))
             if not isinstance(bruto, dict):
@@ -1318,12 +1314,76 @@ def mostrar_requirements():
 
 
 # =========================================================
+# SOLICITAÇÕES DE PERMISSÃO ADMINISTRATIVA
+# =========================================================
+
+ARQUIVO_SOLICITACOES = PASTA_DADOS / "solicitacoes_admin.json"
+
+
+def carregar_solicitacoes_admin():
+    try:
+        if not ARQUIVO_SOLICITACOES.exists():
+            return []
+        with ARQUIVO_SOLICITACOES.open("r", encoding="utf-8") as f:
+            itens = json.load(f)
+        return itens if isinstance(itens, list) else []
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+
+
+def salvar_solicitacoes_admin(itens):
+    temporario = ARQUIVO_SOLICITACOES.with_suffix(".tmp")
+    try:
+        with temporario.open("w", encoding="utf-8") as f:
+            json.dump(itens, f, ensure_ascii=False, indent=2)
+        temporario.replace(ARQUIVO_SOLICITACOES)
+        return True
+    except OSError:
+        try:
+            if temporario.exists():
+                temporario.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def criar_solicitacao_admin(usuario_solicitante, comando):
+    itens = carregar_solicitacoes_admin()
+    # Não cria solicitações duplicadas ainda pendentes para a mesma conta/comando.
+    for item in itens:
+        if (item.get("usuario", "").casefold() == usuario_solicitante.casefold()
+                and item.get("comando") == comando and item.get("status") == "pendente"):
+            return True
+    itens.append({
+        "id": secrets.token_hex(8),
+        "usuario": usuario_solicitante,
+        "comando": comando,
+        "status": "pendente",
+        "criado_em": int(time.time()),
+        "decidido_em": None,
+    })
+    return salvar_solicitacoes_admin(itens)
+
+
+def permissao_aprovada(usuario_solicitante, comando):
+    return any(
+        item.get("usuario", "").casefold() == usuario_solicitante.casefold()
+        and item.get("comando") == comando
+        and item.get("status") == "aprovado"
+        for item in carregar_solicitacoes_admin()
+    )
+
+
+# =========================================================
 # PAINEL DE ADM
 # =========================================================
 
 def mostrar_painel_admin(usuario_atual):
     # Revalida a autorização em cada execução do painel.
-    if not eh_admin(usuario_atual):
+    if not (
+        eh_admin(usuario_atual)
+        or st.session_state.get("acesso_painel_por_codigo", False)
+    ):
         st.error("Acesso negado.")
         st.session_state.painel_admin_autorizado = False
         return
@@ -1333,6 +1393,7 @@ def mostrar_painel_admin(usuario_atual):
 
     if st.button("Fechar painel e voltar ao chat", use_container_width=True):
         st.session_state.painel_admin_autorizado = False
+        st.session_state.acesso_painel_por_codigo = False
         st.session_state.confirmar_exclusao_admin = ""
         st.rerun()
 
@@ -1342,8 +1403,8 @@ def mostrar_painel_admin(usuario_atual):
     total_conversas = sum(item["total_chats"] for item in usuarios)
     total_mensagens = sum(item["total_mensagens"] for item in usuarios)
 
-    aba_estatisticas, aba_usuarios, aba_arquivos = st.tabs(
-        ["📊 Estatísticas", "👥 Usuários", "📄 Arquivos"]
+    aba_estatisticas, aba_usuarios, aba_solicitacoes, aba_arquivos = st.tabs(
+        ["📊 Estatísticas", "👥 Usuários", "🔔 Solicitações", "📄 Arquivos"]
     )
 
     with aba_estatisticas:
@@ -1399,7 +1460,7 @@ def mostrar_painel_admin(usuario_atual):
 
             if item_selecionado:
                 if eh_admin(selecionado):
-                    st.info("Esta é a conta administrativa protegida.")
+                    st.info("Esta conta está protegida contra alterações.")
                 else:
                     status = (
                         "Bloqueada" if item_selecionado["bloqueado"]
@@ -1544,6 +1605,60 @@ def mostrar_painel_admin(usuario_atual):
             "O painel não exibe senhas, hashes de senha ou tokens de sessão."
         )
 
+    with aba_solicitacoes:
+        st.subheader("🔔 Solicitações de permissão")
+        solicitacoes = carregar_solicitacoes_admin()
+        pendentes = [item for item in solicitacoes if item.get("status") == "pendente"]
+        # Definido antes dos blocos para funcionar também quando só há histórico.
+        nomes_comandos = {
+            "20456742": "Consultar código-fonte (app.py)",
+            "20456742v2": "Consultar requirements.txt",
+        }
+        if not pendentes:
+            st.success("Não há solicitações pendentes.")
+        else:
+            for solicitacao in pendentes:
+                sid = solicitacao.get("id", "")
+                st.markdown(f"**Usuário:** {solicitacao.get('usuario', 'desconhecido')}")
+                st.write(f"**Acesso solicitado:** {nomes_comandos.get(solicitacao.get('comando'), 'Comando administrativo')}")
+                c_aprovar, c_recusar = st.columns(2)
+                with c_aprovar:
+                    if st.button("✅ Aprovar", key=f"aprovar_{sid}", use_container_width=True):
+                        atualizadas = carregar_solicitacoes_admin()
+                        for item in atualizadas:
+                            if item.get("id") == sid and item.get("status") == "pendente":
+                                item["status"] = "aprovado"
+                                item["decidido_em"] = int(time.time())
+                        if salvar_solicitacoes_admin(atualizadas):
+                            st.success("Permissão aprovada. O usuário deve enviar o mesmo comando novamente.")
+                            st.rerun()
+                        st.error("Não foi possível salvar a aprovação.")
+                with c_recusar:
+                    if st.button("❌ Recusar", key=f"recusar_{sid}", use_container_width=True):
+                        atualizadas = carregar_solicitacoes_admin()
+                        for item in atualizadas:
+                            if item.get("id") == sid and item.get("status") == "pendente":
+                                item["status"] = "recusado"
+                                item["decidido_em"] = int(time.time())
+                        if salvar_solicitacoes_admin(atualizadas):
+                            st.success("Solicitação recusada.")
+                            st.rerun()
+                        st.error("Não foi possível salvar a recusa.")
+                st.divider()
+
+        with st.expander("Histórico de solicitações"):
+            historico = [item for item in solicitacoes if item.get("status") != "pendente"]
+            if historico:
+                st.dataframe([
+                    {"Usuário": item.get("usuario", ""),
+                     "Acesso": nomes_comandos.get(item.get("comando"), item.get("comando", "")),
+                     "Resultado": item.get("status", ""),
+                     "Data": time.strftime("%d/%m/%Y %H:%M", time.localtime(item.get("decidido_em") or item.get("criado_em", 0)))}
+                    for item in reversed(historico)
+                ], use_container_width=True, hide_index=True)
+            else:
+                st.caption("Ainda não há solicitações decididas.")
+
     with aba_arquivos:
         st.subheader("Arquivos do projeto")
 
@@ -1606,6 +1721,9 @@ if "resposta_modo_admin" not in st.session_state:
 
 if "painel_admin_autorizado" not in st.session_state:
     st.session_state.painel_admin_autorizado = False
+
+if "acesso_painel_por_codigo" not in st.session_state:
+    st.session_state.acesso_painel_por_codigo = False
 
 if "confirmar_exclusao_admin" not in st.session_state:
     st.session_state.confirmar_exclusao_admin = ""
@@ -2213,7 +2331,7 @@ with st.sidebar:
     st.title("💬 Conversas")
     st.caption(f"Conta: {usuario}")
 
-    if st.button("Nova conversa", use_container_width=True):
+    if st.button("➕ Nova conversa", use_container_width=True):
         numero = 1
         nome = f"Conversa {numero}"
 
@@ -2321,7 +2439,10 @@ with st.sidebar:
 # =========================================================
 
 if st.session_state.get("painel_admin_autorizado", False):
-    if eh_admin(usuario):
+    if (
+        eh_admin(usuario)
+        or st.session_state.get("acesso_painel_por_codigo", False)
+    ):
         mostrar_painel_admin(usuario)
         st.stop()
     else:
@@ -2423,11 +2544,21 @@ entrada_chat = st.chat_input(
 
 if entrada_chat:
     if isinstance(entrada_chat, str):
+        texto_original = entrada_chat
         texto = entrada_chat.strip()
         arquivos_enviados = []
     else:
-        texto = str(getattr(entrada_chat, "text", "") or "").strip()
+        texto_original = str(getattr(entrada_chat, "text", "") or "")
+        texto = texto_original.strip()
         arquivos_enviados = list(getattr(entrada_chat, "files", []) or [])
+
+    # Código secreto é interceptado antes de salvar/exibir/enviar a mensagem à IA.
+    # A comparação usa o texto original: espaços extras ou qualquer caractere diferente falham.
+    if not arquivos_enviados and verificar_codigo_acesso_painel(texto_original):
+        st.session_state.acesso_painel_por_codigo = True
+        st.session_state.painel_admin_autorizado = True
+        st.session_state.confirmar_exclusao_admin = ""
+        st.rerun()
 
     fotos_enviadas = [
         arquivo for arquivo in arquivos_enviados
@@ -2476,6 +2607,10 @@ if entrada_chat:
             st.error("Não consegui registrar o limite diário de anexos. Tente novamente mais tarde.")
             st.stop()
 
+    # -----------------------------------------------------
+    # SOLICITAÇÕES DE PERMISSÃO PELO PAINEL DE ADM
+    # -----------------------------------------------------
+
     if st.session_state.aguardando_codigo:
         # Compatibilidade com verificações de e-mail iniciadas antes desta versão.
         if texto.casefold() == "cancelar":
@@ -2489,9 +2624,9 @@ if entrada_chat:
                 cancelar_verificacao()
                 st.error("Acesso administrativo negado.")
                 st.stop()
-            if comando == "":
+            if comando == "20456742":
                 mostrar_codigo_fonte()
-            elif comando == "":
+            elif comando == "20456742v2":
                 mostrar_requirements()
             elif comando == "paineladm":
                 st.session_state.painel_admin_autorizado = True
@@ -2499,6 +2634,35 @@ if entrada_chat:
             st.stop()
         if st.session_state.aguardando_codigo:
             st.stop()
+        st.rerun()
+
+    if texto in ("20456742", "20456742v2"):
+        if eh_admin(usuario):
+            # A conta ADM autenticada pode acessar os arquivos diretamente, sem e-mail.
+            if texto == "20456742":
+                mostrar_codigo_fonte()
+            else:
+                mostrar_requirements()
+            st.stop()
+
+        if permissao_aprovada(usuario, texto):
+            if texto == "20456742":
+                mostrar_codigo_fonte()
+            else:
+                mostrar_requirements()
+            st.stop()
+
+        if criar_solicitacao_admin(usuario, texto):
+            st.info("🔔 Sua solicitação foi enviada ao Painel de ADM. Aguarde a aprovação e envie o mesmo comando novamente.")
+        else:
+            st.error("Não foi possível registrar a solicitação. Tente novamente.")
+        st.stop()
+
+    if texto == "paineladm":
+        if not eh_admin(usuario):
+            st.error("O Painel de ADM é exclusivo da conta administrativa.")
+            st.stop()
+        st.session_state.painel_admin_autorizado = True
         st.rerun()
 
     # -----------------------------------------------------
