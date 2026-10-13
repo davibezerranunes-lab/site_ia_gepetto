@@ -29,6 +29,7 @@ st.set_page_config(
 )
 
 PASTA_DADOS = Path("dados_usuarios")
+ARQUIVO_SOLICITACOES = PASTA_DADOS / "solicitacoes_admin.json"
 PASTA_DADOS.mkdir(parents=True, exist_ok=True)
 PASTA_UPLOADS = PASTA_DADOS / "uploads"
 PASTA_UPLOADS.mkdir(parents=True, exist_ok=True)
@@ -371,9 +372,20 @@ def analisar_imagens_anexadas(usuario, anexos):
             caminho = caminho_anexo(usuario, anexo.get("saved_name"))
             if not caminho or not caminho.is_file():
                 continue
-            bytes_imagem = caminho.read_bytes()
+            # Reduz resolução e peso antes de codificar para evitar payloads enormes.
+            try:
+                from PIL import Image, ImageOps
+                with Image.open(caminho) as imagem_original:
+                    imagem = ImageOps.exif_transpose(imagem_original).convert("RGB")
+                    imagem.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                    buffer_imagem = io.BytesIO()
+                    imagem.save(buffer_imagem, format="JPEG", quality=82, optimize=True)
+                    bytes_imagem = buffer_imagem.getvalue()
+                mime = "image/jpeg"
+            except Exception:
+                # Se não for possível processar a imagem, não enviar bytes potencialmente gigantes.
+                continue
             imagem_base64 = base64.b64encode(bytes_imagem).decode("ascii")
-            mime = anexo.get("mime") or "image/jpeg"
             conteudo.append({"type": "text", "text": f"Foto: {anexo.get('name', 'imagem')}."})
             conteudo.append({
                 "type": "image_url",
@@ -1319,7 +1331,6 @@ def mostrar_requirements():
 # SOLICITAÇÕES DE PERMISSÃO ADMINISTRATIVA
 # =========================================================
 
-ARQUIVO_SOLICITACOES = PASTA_DADOS / "solicitacoes_admin.json"
 
 
 def carregar_solicitacoes_admin():
@@ -2371,6 +2382,32 @@ with st.sidebar:
         ):
             st.session_state.confirmar_exclusao_chat = True
 
+        # Exportação da conversa selecionada em TXT e Markdown.
+        mensagens_exportar = dados["chats"].get(dados["chat_atual"], [])
+        historico_exportar = "\\n\\n".join(
+            f"{str(m.get('role', 'mensagem')).upper()}: {m.get('content', '')}"
+            for m in mensagens_exportar
+        )
+        nome_base_exportar = re.sub(r"[^A-Za-z0-9_-]+", "_", dados["chat_atual"]).strip("_") or "conversa"
+        st.download_button(
+            "📥 Exportar conversa (.txt)",
+            data=historico_exportar,
+            file_name=f"{nome_base_exportar}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+        st.download_button(
+            "📄 Exportar conversa (.md)",
+            data=historico_exportar,
+            file_name=f"{nome_base_exportar}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+
+        with st.expander("⚙️ Configurações da IA"):
+            st.slider("Criatividade (Temperatura)", 0.0, 1.0, 0.6, step=0.1, key="gepetto_temperatura")
+            st.slider("Tamanho máximo da resposta (tokens)", 256, 4096, 2048, step=256, key="gepetto_max_tokens")
+
         if st.session_state.confirmar_exclusao_chat:
             st.warning(
                 f"Excluir a conversa '{dados['chat_atual']}'? "
@@ -2789,18 +2826,28 @@ if dados["chat_atual"]:
                         "content": conteudo_texto[:limite_contexto],
                     })
 
-                resposta = cliente.chat.completions.create(
+                temperatura = float(st.session_state.get("gepetto_temperatura", 0.6))
+                max_tokens = int(st.session_state.get("gepetto_max_tokens", 2048))
+                resposta_stream = cliente.chat.completions.create(
                     model=MODELO,
                     messages=mensagens_api,
-                    temperature=0.6,
-                    max_completion_tokens=2048,
+                    temperature=temperatura,
+                    max_completion_tokens=max_tokens,
+                    stream=True,
                 )
 
-                texto_resposta = (
-                    resposta.choices[0].message.content
-                    or "Não consegui gerar uma resposta."
-                )
-                area_resposta.markdown(texto_resposta)
+                def gerar_texto():
+                    for chunk in resposta_stream:
+                        if not chunk.choices:
+                            continue
+                        trecho = chunk.choices[0].delta.content
+                        if trecho:
+                            yield trecho
+
+                texto_resposta = area_resposta.write_stream(gerar_texto())
+                if not texto_resposta:
+                    texto_resposta = "Não consegui gerar uma resposta."
+                    area_resposta.markdown(texto_resposta)
                 mensagens.append({"role": "assistant", "content": texto_resposta})
                 if not salvar_dados(usuario, dados):
                     st.error("Não foi possível salvar a resposta no histórico.")
