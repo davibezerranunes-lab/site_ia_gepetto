@@ -1469,7 +1469,6 @@ def permissao_aprovada(usuario_solicitante, comando):
 # PAINEL DE ADM
 # =========================================================
 
-@st.fragment
 def mostrar_painel_admin(usuario_atual):
     # Revalida a autorização em cada execução do painel.
     if not eh_admin(usuario_atual):
@@ -1491,11 +1490,27 @@ def mostrar_painel_admin(usuario_atual):
     total_conversas = sum(item["total_chats"] for item in usuarios)
     total_mensagens = sum(item["total_mensagens"] for item in usuarios)
 
-    aba_estatisticas, aba_usuarios, aba_solicitacoes, aba_arquivos, aba_prompts = st.tabs(
-        ["📊 Estatísticas", "👥 Usuários", "🔔 Solicitações", "📄 Arquivos", "🧠 Prompts da IA"]
+    # Um seletor controlado pelo estado da sessão é mais confiável em telas
+    # estreitas e evita a renderização simultânea de todas as seções do painel.
+    secoes_admin = [
+        "📊 Estatísticas",
+        "👥 Usuários",
+        "🔔 Solicitações",
+        "📄 Arquivos",
+        "🧠 Prompts da IA",
+    ]
+    if st.session_state.get("admin_secao_atual") not in secoes_admin:
+        st.session_state["admin_secao_atual"] = secoes_admin[0]
+    secao_admin = st.radio(
+        "Seção do painel administrativo",
+        options=secoes_admin,
+        key="admin_secao_atual",
+        horizontal=True,
+        label_visibility="collapsed",
     )
+    st.divider()
 
-    with aba_estatisticas:
+    if secao_admin == "📊 Estatísticas":
         st.subheader("Visão geral do site")
         col1, col2 = st.columns(2)
 
@@ -1513,9 +1528,9 @@ def mostrar_painel_admin(usuario_atual):
         )
 
         if st.button("🔄 Atualizar estatísticas", use_container_width=True):
-            st.rerun(scope="fragment")
+            st.rerun()
 
-    with aba_usuarios:
+    if secao_admin == "👥 Usuários":
         st.subheader("Gerenciar usuários")
 
         if not usuarios:
@@ -1589,7 +1604,7 @@ def mostrar_painel_admin(usuario_atual):
                                     st.session_state.admin_reset_codigo_pendente = False
                                     st.session_state.admin_reset_verificado_ate = time.time() + 300
                                     st.success("E-mail verificado. Você pode redefinir uma senha por até 5 minutos.")
-                                    st.rerun(scope="fragment")
+                                    st.rerun()
                     else:
                         expiracao_reset = st.session_state.get("admin_reset_verificado_ate", 0)
                         if time.time() > expiracao_reset:
@@ -1624,7 +1639,7 @@ def mostrar_painel_admin(usuario_atual):
                                     if ok:
                                         st.session_state.admin_reset_email_verificado = False
                                         st.session_state.admin_reset_verificado_ate = 0
-                                        st.rerun(scope="fragment")
+                                        st.rerun()
 
                     col_bloquear, col_excluir = st.columns(2)
 
@@ -1639,7 +1654,7 @@ def mostrar_painel_admin(usuario_atual):
                                 )
                                 (st.success if ok else st.error)(msg)
                                 if ok:
-                                    st.rerun(scope="fragment")
+                                    st.rerun()
                         else:
                             if st.button(
                                 "🔒 Bloquear conta",
@@ -1650,7 +1665,7 @@ def mostrar_painel_admin(usuario_atual):
                                 )
                                 (st.success if ok else st.error)(msg)
                                 if ok:
-                                    st.rerun(scope="fragment")
+                                    st.rerun()
 
                     with col_excluir:
                         if st.button(
@@ -1679,7 +1694,7 @@ def mostrar_painel_admin(usuario_atual):
                                 (st.success if ok else st.error)(msg)
                                 st.session_state.confirmar_exclusao_admin = ""
                                 if ok:
-                                    st.rerun(scope="fragment")
+                                    st.rerun()
 
                         with col_nao:
                             if st.button(
@@ -1687,13 +1702,13 @@ def mostrar_painel_admin(usuario_atual):
                                 use_container_width=True,
                             ):
                                 st.session_state.confirmar_exclusao_admin = ""
-                                st.rerun(scope="fragment")
+                                st.rerun()
 
         st.caption(
             "O painel não exibe senhas, hashes de senha ou tokens de sessão."
         )
 
-    with aba_solicitacoes:
+    if secao_admin == "🔔 Solicitações":
         st.subheader("🔔 Solicitações de permissão")
         solicitacoes = carregar_solicitacoes_admin()
         pendentes = [item for item in solicitacoes if item.get("status") == "pendente"]
@@ -1719,7 +1734,7 @@ def mostrar_painel_admin(usuario_atual):
                                 item["decidido_em"] = int(time.time())
                         if salvar_solicitacoes_admin(atualizadas):
                             st.success("Permissão aprovada. O usuário deve enviar o mesmo comando novamente.")
-                            st.rerun(scope="fragment")
+                            st.rerun()
                         st.error("Não foi possível salvar a aprovação.")
                 with c_recusar:
                     if st.button("❌ Recusar", key=f"recusar_{sid}", use_container_width=True):
@@ -1730,7 +1745,7 @@ def mostrar_painel_admin(usuario_atual):
                                 item["decidido_em"] = int(time.time())
                         if salvar_solicitacoes_admin(atualizadas):
                             st.success("Solicitação recusada.")
-                            st.rerun(scope="fragment")
+                            st.rerun()
                         st.error("Não foi possível salvar a recusa.")
                 st.divider()
 
@@ -1747,7 +1762,7 @@ def mostrar_painel_admin(usuario_atual):
             else:
                 st.caption("Ainda não há solicitações decididas.")
 
-    with aba_arquivos:
+    if secao_admin == "📄 Arquivos":
         st.subheader("Arquivos do projeto")
 
         if st.button("📄 Consultar app.py", use_container_width=True):
@@ -1756,7 +1771,7 @@ def mostrar_painel_admin(usuario_atual):
         if st.button("📦 Consultar requirements.txt", use_container_width=True):
             mostrar_requirements()
 
-    with aba_prompts:
+    if secao_admin == "🧠 Prompts da IA":
         st.subheader("🧠 Controlar os prompts da IA")
         st.caption("Edite as instruções que orientam as respostas. As alterações ficam em dados_usuarios/prompts_ia.json.")
         prompts_atuais = carregar_prompts_configurados()
@@ -1769,14 +1784,14 @@ def mostrar_painel_admin(usuario_atual):
                 st.error("Os dois prompts precisam conter texto.")
             elif salvar_prompts_configurados(prompt_padrao_editado, prompt_admin_editado):
                 st.success("Prompts salvos. As próximas respostas usarão as alterações.")
-                st.rerun(scope="fragment")
+                st.rerun()
             else:
                 st.error("Não foi possível salvar. Verifique se o armazenamento permite escrita.")
         if st.button("↩️ Restaurar prompts originais", use_container_width=True):
             try:
                 ARQUIVO_PROMPTS.unlink(missing_ok=True)
                 st.success("Os prompts originais serão usados novamente.")
-                st.rerun(scope="fragment")
+                st.rerun()
             except OSError:
                 st.error("Não foi possível remover o arquivo de configuração.")
 
