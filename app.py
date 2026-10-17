@@ -2740,4 +2740,4 @@ st.divider()
 
 st.caption(
     "Gepetto AI • Seu assistente de inteligência artificial"
-)"
+)
